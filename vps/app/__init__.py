@@ -1,0 +1,1 @@
+"""Audio silence trimming service."""
