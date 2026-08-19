@@ -1,132 +1,167 @@
-# 纯 Android 离线方案
+# VadCut Android SDK
 
-本目录只描述纯 Android 本地实现：不上传音频、不依赖 VPS、不需要网络。目标是把录音中的长静音裁掉，并以一个可以集成到 Kotlin/Java 项目的 AAR module 形式提供。
+完全在 Android 本地运行的长录音语音/静音裁剪 SDK。输入任意 Android `Uri`，SDK 流式解码、检测、拼接并输出 AAC/M4A；不上传音频，不需要 FFmpeg，也不需要存储权限。
 
-## 最终链路
+当前版本：`0.1.0`
 
-```text
-AndroidVadRecorder
-    → AudioRecord
-    → 16 kHz / mono / PCM 16-bit
-    → VadEngine
-    → SpeechSegmenter
-    → SpeechSegment sample ranges
-    → WavExporter 或宿主 App 的 MediaCodec/MediaMuxer
-```
+## 能力与边界
 
-当前仓库中的 [`vad-sdk/`](vad-sdk/) 是本地 SDK module。它没有 UI、网络请求、Activity 依赖、FFmpeg 或 ONNX Runtime。
+- `SPEECH`：使用随包提供的 Silero VAD v6.2.1，只保留人声，适合会议、采访、语音备忘录。
+- `NON_SILENCE`：使用 RMS 能量检测，保留人声、音乐和其他非静音声音。
+- 长音频采用两遍流式处理。PCM 缓冲区大小固定，不把整段录音载入内存；区间元数据随剪切点数量增长。
+- 输出固定为 AAC 音轨的 M4A 文件；有视频轨的输入会只导出音频。
+- Android 7.0+（API 24），支持 `arm64-v8a`、`armeabi-v7a`，并提供 `x86_64` 模拟器支持。
+- 支持 16 KB 内存页：当前依赖中的所有 ARM/x86_64 ELF LOAD 段均为 `0x4000` 对齐，示例 APK 也通过 `zipalign -P 16`。
+- 输入格式取决于设备的 `MediaExtractor`/`MediaCodec`。M4A/AAC、MP3、WAV、FLAC、Ogg 等常见格式通常可用，但厂商设备的编解码器集合可能不同。
 
-## 当前实现
+## 推荐集成：本地 Maven 仓库
 
-SDK 当前内置纯 Java `EnergyVadEngine`，用于第一版离线长静音裁剪：
-
-- 自适应 RMS/dBFS 噪声底；
-- 连续语音帧确认；
-- 连续静音帧才切断；
-- 前后保留安全边界；
-- 输入输出只使用 PCM sample index；
-- 不需要 `.so`、模型或额外运行时。
-
-`VadEngine` 已经是后端接口。后续如果真实设备噪声测试需要更强鲁棒性，可以增加 `vad-sdk-webrtc`，把 NDK WebRTC VAD 接入同一个接口，不需要修改录音和裁剪层。
-
-## 接入现有 Android 工程
-
-把仓库作为 module 加入宿主工程：
+将交付包 `vadcut-maven-0.1.0.zip` 解压到项目目录，例如 `third_party/vadcut-maven`，然后在 `settings.gradle.kts` 中添加：
 
 ```kotlin
-// settings.gradle.kts
-include(":vad-sdk")
-project(":vad-sdk").projectDir = file("android/vad-sdk")
-
-// app/build.gradle.kts
-implementation(project(":vad-sdk"))
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("$rootDir/third_party/vadcut-maven") }
+    }
+}
 ```
 
-模块最低支持 `minSdk 21`，不要求 Kotlin plugin、AndroidX 或协程。
-
-## Kotlin 使用
-
-宿主 App 先申请运行时麦克风权限：
-
-```xml
-<uses-permission android:name="android.permission.RECORD_AUDIO" />
-```
-
-然后在后台线程录音和导出：
+应用模块添加一行依赖：
 
 ```kotlin
-val config = VadConfig.builder()
-    .setSampleRate(16_000)
-    .setFrameDurationMs(20)
-    .setMinSpeechMs(80)
-    .setMinSilenceMs(700)
-    .setKeepSilenceMs(250)
+dependencies {
+    implementation("com.vadcut:vadcut-android:0.1.0")
+}
+```
+
+Maven 方式会自动带入 Media3、ONNX Runtime 和 Kotlin Coroutines 的传递依赖。SDK 自身不声明任何 Android 权限。
+
+如果只能使用裸 AAR，把 `vadcut-release.aar` 放进 `app/libs` 后，还必须显式加入这些运行时依赖：
+
+```kotlin
+implementation(files("libs/vadcut-release.aar"))
+implementation("androidx.media3:media3-common:1.11.0")
+implementation("androidx.media3:media3-effect:1.11.0")
+implementation("androidx.media3:media3-transformer:1.11.0")
+implementation("com.microsoft.onnxruntime:onnxruntime-android:1.28.0")
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+```
+
+## Kotlin
+
+```kotlin
+val request = TrimRequest.Builder(inputUri, outputUri)
+    .setConfig(TrimConfig.fromPreset(TrimPreset.VOICE_MEMO))
     .build()
 
-val rawPcm = File(cacheDir, "take.pcm")
-val recorder = VadSdk.createRecorder(config, rawPcm)
-recorder.start()
+val task = VadCut.with(context).trimAsync(request, object : TrimListener {
+    override fun onProgress(progress: TrimProgress) {
+        progressBar.progress = progress.percent
+    }
 
-// 用户点击停止后，放到 Dispatchers.IO 或其他后台线程执行
-val recording = recorder.stop()
-val outputWav = File(cacheDir, "trimmed.wav")
-WavExporter.export(
-    recording.pcmFile,
-    recording.speechSegments,
-    recording.sampleRate,
-    outputWav,
-)
+    override fun onSuccess(result: TrimResult) {
+        // result.keptRanges / removedRanges 可用于日志、预览或审计。
+        println("removed ${result.removedDurationMs} ms")
+    }
+
+    override fun onError(error: TrimException) {
+        println("${error.code}: ${error.message}")
+    }
+
+    override fun onCancelled() = Unit
+})
+
+// 需要时取消：
+task.cancel()
 ```
 
-如果宿主 App 已经有自己的 `AudioRecord`，也可以只使用底层 API：
+Kotlin 协程调用也可直接使用：
 
 ```kotlin
-val processor = VadSdk.createDefault(config)
-processor.accept(pcmShortArray, 0, validSampleCount)
-val ranges = processor.finish()
+val result = VadCut.with(context).trim(request) { progress ->
+    // 回调固定在主线程。
+}
 ```
 
-Java 项目使用同一套 public Java API，不需要 Kotlin runtime：
+## Java
 
 ```java
-VadConfig config = VadConfig.builder()
-        .setSampleRate(16000)
-        .setFrameDurationMs(20)
-        .setMinSilenceMs(700)
-        .setKeepSilenceMs(250)
+TrimConfig config = TrimConfig.fromPreset(TrimPreset.VOICE_MEMO);
+TrimRequest request = new TrimRequest.Builder(inputUri, outputUri)
+        .setConfig(config)
         .build();
 
-AndroidVadRecorder recorder = VadSdk.createRecorder(config, rawPcmFile);
-recorder.start();
-LocalVadRecording recording = recorder.stop();
-WavExporter.export(
-        recording.getPcmFile(),
-        recording.getSpeechSegments(),
-        recording.getSampleRate(),
-        outputWav);
+TrimTask task = VadCut.with(context).trimAsync(request, new TrimListener() {
+    @Override public void onProgress(TrimProgress progress) { }
+    @Override public void onSuccess(TrimResult result) { }
+    @Override public void onError(TrimException error) { }
+    @Override public void onCancelled() { }
+});
 ```
 
-## 音频输入和输出边界
+完整的可运行示例位于 `sample-kotlin` 和 `sample-java`。
 
-- 本地实时采集使用 `AudioRecord`，输入统一为 16 kHz、单声道、PCM16。
-- SDK 不自动申请权限，权限和前台服务由宿主 App 管理。
-- `AndroidVadRecorder` 保存原始 PCM，同时在线计算语音区间，长录音不会把整段音频放进内存。
-- `WavExporter` 可以直接输出裁剪后的 WAV。
-- 如果必须输出 AAC/M4A，由宿主 App 使用 Android `MediaCodec`/`MediaMuxer` 编码。
-- 不把 FFmpeg 放进核心 AAR，避免包体、ABI 和许可证复杂度。
+## 参数选择
 
-## 推荐参数
+推荐先使用预设：
 
-| 参数 | 默认值 | 作用 |
-|---|---:|---|
-| sample rate | 16 kHz | 统一语音输入格式 |
-| frame | 20 ms | CPU、延迟和边界精度的折中 |
-| min speech | 80 ms | 防止噪声尖峰启动语音片段 |
-| min silence | 700 ms | 只有长静音才切断 |
-| keep silence | 250 ms | 保留语音前后的自然边界 |
+- `CONSERVATIVE`：静音至少 1.2 秒才切，保留更宽的人声边缘。
+- `VOICE_MEMO`：默认；静音至少 700 ms 才切，前置 180 ms、后置 250 ms。
+- `AGGRESSIVE`：静音约 350 ms 即切，成品更紧凑。
 
-短停顿不按单帧删除，真正的切断条件是 `minSilenceMs`。
+自定义示例：
 
-## 工程验证边界
+```kotlin
+val config = TrimConfig.Builder()
+    .setMode(TrimMode.SPEECH)
+    .setMinimumSilenceDurationMs(800)
+    .setPaddingBeforeMs(200)
+    .setPaddingAfterMs(300)
+    .setFadeDurationMs(8)
+    .setNoSpeechPolicy(NoSpeechPolicy.KEEP_ORIGINAL)
+    .build()
+```
 
-纯 Java VAD、分帧、区间状态机和 WAV 导出可以在普通 JDK 下做单元测试；`AudioRecord` 和最终 AAR 必须在 Android SDK、Android Gradle Plugin 和实体设备上验证。真实设备测试至少覆盖权限拒绝、普通麦克风、蓝牙麦克风、静音、短停顿、长停顿和长录音。
+默认使用双阈值滞回（开始 `0.55`、结束 `0.35`）以减少边界抖动；每个保留区间的两端应用短淡入淡出，避免切点爆音。未检测到活动时默认保留整段并在 `warnings` 中返回 `NO_ACTIVITY_DETECTED_KEPT_ORIGINAL`，不会意外生成空文件。
+
+## 长任务与生命周期
+
+SDK 不擅自创建 Service 或通知。前台页面内可直接使用 `TrimTask`；需要在锁屏、切后台或进程重启后继续的长任务，应由宿主应用放入 WorkManager 或 Foreground Service，并持久化 SAF URI 权限。不要把输入和输出设为同一个 URI。
+
+处理需要两遍完整读取：第一遍检测区间，第二遍解码、删除区间并只编码一次 AAC。实际速度与耗电取决于 SoC、输入编解码器和录音时长。缓存目录必须容纳一份完整的临时 M4A；写入最终 URI 后临时文件会删除。
+
+## 体积成本
+
+标准包使用完整 ONNX Runtime，优先追求兼容性和可靠性。当前通用调试 APK 约 91 MB，因为它同时包含三个 ABI；Play App Bundle 或 ABI split 只向设备交付一个 ABI。模型本身约 2.3 MB，原生运行库按 ABI 约 20–35 MB。若最终产品对包体极敏感，可在后续版本使用仅包含 Silero 所需算子的自定义 reduced-operator ONNX Runtime 构建，公开 API 无需变化。
+
+## 为什么第一版不使用 FFmpeg
+
+Android 平台已提供硬件/系统解码器，Media3 Transformer 负责稳定的导出、取消和进度；再打入 FFmpeg 会增加包体、Native ABI 维护和许可证组合成本。对于“无损分段复制”“极少见容器格式”或完全一致的跨设备软件编码，才值得增加可选 FFmpeg 后端。
+
+## 构建与验证
+
+要求 JDK 17 和 Android SDK 36：
+
+```bash
+./gradlew :vadcut:testDebugUnitTest \
+  :vadcut:assembleDebugAndroidTest \
+  :vadcut:assembleRelease \
+  :sample-kotlin:assembleDebug \
+  :sample-java:assembleDebug
+```
+
+验证 APK 中所有 ELF 的 16 KB 段对齐：
+
+```bash
+python scripts/verify_elf_alignment.py sample-kotlin/build/outputs/apk/debug/sample-kotlin-debug.apk
+```
+
+连接真机或启动模拟器后，可运行包含真实 WAV → VAD → Media3 → M4A 全链路的设备测试：
+
+```bash
+./gradlew :vadcut:connectedDebugAndroidTest
+```
+
+本仓库源码采用 Apache-2.0。第三方组件和模型见 `THIRD_PARTY_NOTICES.md`。
