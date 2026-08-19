@@ -4,11 +4,27 @@
 
 ```text
 vps/       CPU 后端：VAD + PCM 重建 + M4A/WAV 输出
-android/   Android 客户端：录音、上传、下载处理结果
+android/   完整 Android 离线 SDK：Silero VAD + Media3 + M4A 输出
 ios/       iOS 客户端接口约定和实现计划
 ```
 
-## 推荐的主链路
+## Android 推荐主链路
+
+Android 默认使用 `android/` 中的纯本地 SDK，不上传录音：
+
+```text
+Android Uri（设备支持的音频格式）
+    → MediaExtractor / MediaCodec 流式解码
+    → Silero VAD 检测语音区间
+    → 删除长静音，保留短停顿和语音边界
+    → Media3 导出 AAC/M4A
+```
+
+SDK 支持 Kotlin 和 Java，包含进度、取消、保留/删除区间报告、Kotlin/Java 示例和 Maven 发布配置。模型与处理均在设备端运行，不依赖网络或 VPS。
+
+## VPS 可选链路
+
+需要让 Android、iOS 或其他客户端统一由服务器处理时，可以使用 `vps/`：
 
 ```text
 Android / iOS
@@ -19,13 +35,12 @@ Android / iOS
     → 返回处理后的 M4A/WAV
 ```
 
-移动端默认不重复跑 VAD。这样模型、阈值和音频切割结果由服务器统一控制，手机只承担录音、网络和播放，功耗和包体都更低。
+VPS 方案适合希望统一模型和阈值、降低客户端包体或跨平台复用同一处理结果的场景；它不是 Android SDK 的必需依赖。
 
 ## 目录
 
 - [VPS 服务](vps/README.md)
-- [Android 集成](android/README.md)
-- [Android 本地 VAD 备选方案](android/local-vad.md)
+- [Android 离线 VAD SDK](android/README.md)
 - [iOS 方案](ios/README.md)
 
 ## API 契约
@@ -59,5 +74,5 @@ Content-Type: audio/mp4
 ## 当前状态
 
 - VPS 版本已经实现并在本地真实音频和 HTTP 接口上验证。
-- Android 现在实现服务端处理客户端；本地 VAD 作为独立备选，不混入默认路径。
+- Android 已实现完整本地离线 SDK，支持 Silero VAD、能量非静音模式、Android `Uri` 输入和 AAC/M4A 导出；正式投产前仍需完成真机矩阵与长录音压力测试。
 - iOS 保持同一 HTTP 契约，后续使用 AVAudioRecorder/AVAudioEngine + URLSession/原生上传实现。
