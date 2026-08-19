@@ -4,9 +4,7 @@ import XCTest
 
 final class EndToEndTests: XCTestCase {
     func testSileroTrimsRealWavToPlayableM4A() async throws {
-        let fixture = try XCTUnwrap(
-            Bundle(for: Self.self).url(forResource: "vad-smoke", withExtension: "wav")
-        )
+        let fixture = try fixtureURL()
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("vadcut-ios-e2e-\(UUID().uuidString).m4a")
         defer { try? FileManager.default.removeItem(at: output) }
@@ -30,9 +28,7 @@ final class EndToEndTests: XCTestCase {
     }
 
     func testEnergyModeKeepsOriginalWhenFixtureHasNoActivityAtImpossibleThreshold() async throws {
-        let fixture = try XCTUnwrap(
-            Bundle(for: Self.self).url(forResource: "vad-smoke", withExtension: "wav")
-        )
+        let fixture = try fixtureURL()
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("vadcut-ios-energy-\(UUID().uuidString).m4a")
         defer { try? FileManager.default.removeItem(at: output) }
@@ -47,5 +43,16 @@ final class EndToEndTests: XCTestCase {
         XCTAssertTrue(result.warnings.contains(.noActivityDetectedKeptOriginal))
         XCTAssertEqual(result.keptRanges.count, 1)
         XCTAssertGreaterThan(result.outputDurationMilliseconds, 10_000)
+    }
+
+    private func fixtureURL() throws -> URL {
+        let bundle = Bundle(for: Self.self)
+        if let direct = bundle.url(forResource: "vad-smoke", withExtension: "wav") {
+            return direct
+        }
+        return try XCTUnwrap(
+            bundle.url(forResource: "vad-smoke", withExtension: "wav", subdirectory: "Fixtures"),
+            "vad-smoke.wav is missing from the VadCutIOSTests bundle"
+        )
     }
 }

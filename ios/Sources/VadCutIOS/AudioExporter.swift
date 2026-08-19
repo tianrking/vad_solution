@@ -2,6 +2,14 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
+private final class ExportSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+
+    init(_ session: AVAssetExportSession) {
+        self.session = session
+    }
+}
+
 final class AudioExporter {
     func export(
         inputURL: URL,
@@ -79,19 +87,20 @@ final class AudioExporter {
         audioMix.inputParameters = [audioParameters]
         exporter.audioMix = audioMix
         exporter.shouldOptimizeForNetworkUse = false
+        let exportSession = ExportSessionBox(exporter)
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
                 timer.schedule(deadline: .now(), repeating: .milliseconds(200))
                 timer.setEventHandler {
-                    onProgress(Int(exporter.progress * 100))
+                    onProgress(Int(exportSession.session.progress * 100))
                 }
                 timer.resume()
 
-                exporter.exportAsynchronously {
+                exportSession.session.exportAsynchronously {
                     timer.cancel()
-                    switch exporter.status {
+                    switch exportSession.session.status {
                     case .completed:
                         onProgress(100)
                         continuation.resume()
@@ -102,14 +111,14 @@ final class AudioExporter {
                             throwing: TrimError(
                                 code: .exportFailed,
                                 message: "AVFoundation M4A export failed",
-                                underlying: exporter.error
+                                underlying: exportSession.session.error
                             )
                         )
                     }
                 }
             }
         } onCancel: {
-            exporter.cancelExport()
+            exportSession.session.cancelExport()
         }
     }
 }

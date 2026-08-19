@@ -13,9 +13,11 @@ targets:
     type: framework
     platform: iOS
     sources:
-      - Sources/VadCutIOS
-    resources:
-      - Sources/VadCutIOS/Resources
+      - path: Sources/VadCutIOS
+        excludes:
+          - Resources
+      - path: Sources/VadCutIOS/Resources
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vadcut.ios
@@ -26,9 +28,9 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - Tests/VadCutIOSTests
-    resources:
-      - Tests/Fixtures
+      - path: Tests/VadCutIOSTests
+      - path: Tests/Fixtures
+        buildPhase: resources
     dependencies:
       - target: VadCutIOS
     settings:
