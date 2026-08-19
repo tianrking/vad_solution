@@ -1,0 +1,75 @@
+name: iOS SDK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - 'VadCutIOS.podspec'
+      - '.github/workflows/ios-sdk.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'VadCutIOS.podspec'
+      - '.github/workflows/ios-sdk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: xcodebuild -version
+
+      - name: Install project generator
+        run: brew install xcodegen
+
+      - name: Generate workspace
+        working-directory: ios
+        run: |
+          xcodegen generate
+          pod install --repo-update
+
+      - name: Select simulator
+        id: simulator
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | ruby -rjson -e '
+            devices = JSON.parse(STDIN.read).fetch("devices").values.flatten
+            device = devices.find { |item| item["isAvailable"] && item["name"].start_with?("iPhone") }
+            abort "No available iPhone simulator" unless device
+            puts device.fetch("udid")
+          ')
+          echo "id=$DEVICE_ID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$DEVICE_ID" || true
+
+      - name: Build and run tests
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -workspace VadCutIOS.xcworkspace \
+            -scheme VadCutIOS \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}' \
+            -resultBundlePath VadCutIOS.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee xcodebuild.log
+
+      - name: Lint CocoaPod
+        run: pod lib lint VadCutIOS.podspec --allow-warnings --skip-tests --platforms=ios
+
+      - name: Upload Xcode diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcode-diagnostics
+          path: |
+            ios/VadCutIOS.xcresult
+            ios/xcodebuild.log
+          if-no-files-found: ignore
