@@ -1,76 +1,72 @@
-# Android 本地 VAD 方案
+# 纯 Android 本地 VAD
 
-这是需要低延迟、离线或边录边裁剪时使用的方案。可直接集成仓库中的 [`vad-sdk/`](vad-sdk/)，远程 API 仍然保留在 [`remote-trim-client/`](remote-trim-client/)。
-
-## 采集链路
+本方案完全离线，不走网络：
 
 ```text
 AudioRecord
-    → 16 kHz / mono / PCM 16-bit
-    → 每帧 20 ms（320 samples）
-    → VadEngine（默认自适应能量 VAD；可替换为 NDK WebRTC/ONNX）
-    → SpeechSegmenter
-    → PCM range 重建
-    → MediaCodec/MediaMuxer 或 WAV
+  → 16 kHz / mono / PCM16
+  → VadEngine
+  → SpeechSegmenter
+  → sample ranges
+  → WAV 或 Android MediaCodec/MediaMuxer
 ```
 
-`AudioRecord` 适合读取原始音频帧，但实际采样配置要检查设备返回值，不能假设所有麦克风都严格按请求的采样率工作。[AudioRecord API](https://developer.android.com/reference/android/media/AudioRecord)
+## 目前使用的后端
 
-## 后端取舍
+首版 `vad-sdk` 使用纯 Java 自适应能量 VAD：
 
-### 默认：自适应能量 VAD
+- 不需要模型；
+- 不需要 NDK 和 `.so`；
+- 不需要 FFmpeg；
+- CPU 和 APK 体积都很低；
+- 适合删除长静音，而不是语音识别。
 
-对于“删除长静音”，首版 SDK 使用纯 Java 的自适应 RMS/能量检测：
+它通过噪声底、最短语音时长、最长允许静音间隔和前后保留边界来处理短停顿。不要把每个 `false` 帧直接删除。
 
-- 不需要模型和 native `.so`；
-- AAR 小，接入简单，Java/Kotlin 项目都能直接使用；
-- CPU 和电量开销很低；
-- 通过噪声底估计、连续语音帧、连续静音帧和保留边界，避免把短停顿误删。
+## SDK 入口
 
-它不是通用语音识别，也不承诺在强噪声环境下达到神经网络 VAD 的效果。
-
-### 需要增强时：NDK WebRTC VAD
-
-WebRTC VAD 适合作为同一 `VadEngine` 接口的可选 native backend：
-
-- 不需要下载神经网络模型；
-- NDK 二进制体积小；
-- 10/20/30 ms 帧接口简单；
-- CPU 负担低；
-- Android 和 VPS 可以复用同一类 VAD 行为。
-
-Java/Kotlin 层只负责采集和状态机；音频帧判断放在 C/C++，避免每帧产生大量对象。官方 VAD C 接口要求固定的 10/20/30 ms 帧，常用 16 kHz 单声道 PCM。
-
-## 必须保留的状态机
-
-不要把 `false` 帧直接删除。建议：
+主要类型：
 
 ```text
-frame_ms = 20
-start_after = 80~120 ms speech
-close_after = 400~700 ms non-speech
-remove_only_if_gap >= 600~1000 ms
-keep_silence = 200~400 ms
-padding = 80~150 ms
+VadSdk
+  ├── createRecorder(config, pcmFile)
+  │     └── AndroidVadRecorder
+  │           └── LocalVadRecording
+  └── createDefault(config)
+        └── PcmVadProcessor
+              ├── VadEngine
+              └── SpeechSegmenter
 ```
 
-采集线程只做快速复制，VAD 和区间整理放到专用后台线程。长录音结束后，按 sample index 重建 PCM；不要以 wall-clock 时间拼接。
+录音权限由宿主 App 申请：
 
-## Silero/ONNX 什么时候值得
+```xml
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+```
 
-在嘈杂环境、远距离说话、轻声说话时，如果 WebRTC VAD 误判较多，再考虑 Silero VAD + ONNX Runtime CPU。它会增加模型、运行时和 APK 体积；对于已经上传到 VPS 的录音，手机端再跑一遍通常没有收益。
+录音、停止和 `WavExporter.export()` 都放在后台线程执行。
 
-## TEN VAD 什么时候值得
-
-TEN VAD 在 Android 上提供 ARM 预编译库和 Java 接口，技术上可以做成 `TenVadEngine`。但它的 Apache 2.0 许可包含额外部署限制，尤其不适合未经审查就作为面向第三方开发者的通用 SDK 默认依赖。仓库只保留后端扩展边界，不把 TEN 的二进制复制进公共 AAR。
-
-## 结论
-
-当前项目的推荐默认仍是远程处理：
+## 参数建议
 
 ```text
-Android：录音 + 上传 + 播放
-VPS：VAD + 裁剪 + 编码
+frameDurationMs = 20
+minSpeechMs = 80~120
+minSilenceMs = 600~800
+keepSilenceMs = 200~300
 ```
 
-本地 SDK 用于 `offline` 或 `realtime` mode，不与远程模式同时默认启用。
+先用真实手机录音调参，再固定产品默认值。不同手机的麦克风增益、自动增益和环境噪声会影响能量阈值。
+
+## 后续增强边界
+
+如果真实设备测试发现噪声环境误判较多，再增加单独的 `vad-sdk-webrtc` AAR：
+
+```text
+vad-sdk-core
+  Java API + segmenter + recorder
+
+vad-sdk-webrtc
+  NDK WebRTC VAD + arm64-v8a
+```
+
+业务层不需要改变。ONNX 只在实测确实需要更强噪声鲁棒性时作为可选 provider，不进入核心 SDK。

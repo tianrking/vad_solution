@@ -1,5 +1,9 @@
 package com.tianrking.vadsolution.sdk;
 
+import java.io.File;
+import java.io.RandomAccessFile;
+import java.util.Arrays;
+
 /** Small dependency-free smoke test useful before an Android toolchain is available. */
 public final class VadSdkSmokeTest {
     private VadSdkSmokeTest() {
@@ -29,7 +33,59 @@ public final class VadSdkSmokeTest {
         if (!processor.finish().isEmpty()) {
             throw new AssertionError("silence-only input should have no speech ranges");
         }
+        testWavExporter();
         System.out.println("VadSdkSmokeTest passed");
+    }
+
+    private static void testWavExporter() {
+        File pcm = null;
+        File wav = null;
+        try {
+            pcm = File.createTempFile("vad-sdk-", ".pcm");
+            wav = File.createTempFile("vad-sdk-", ".wav");
+            try (RandomAccessFile output = new RandomAccessFile(pcm, "rw")) {
+                for (int i = 0; i < 1_000; i++) {
+                    output.write(i & 0xff);
+                    output.write((i >>> 8) & 0xff);
+                }
+            }
+            WavExporter.export(
+                    pcm,
+                    Arrays.asList(new SpeechSegment(100, 200), new SpeechSegment(400, 500)),
+                    16_000,
+                    wav);
+            if (wav.length() != 44 + 400) {
+                throw new AssertionError("unexpected WAV length: " + wav.length());
+            }
+            try (RandomAccessFile input = new RandomAccessFile(wav, "r")) {
+                if (input.readUnsignedByte() != 'R'
+                        || input.readUnsignedByte() != 'I'
+                        || input.readUnsignedByte() != 'F'
+                        || input.readUnsignedByte() != 'F') {
+                    throw new AssertionError("WAV RIFF header is invalid");
+                }
+                input.seek(40);
+                if (readIntLE(input) != 400) {
+                    throw new AssertionError("WAV data length is invalid");
+                }
+            }
+        } catch (Exception failure) {
+            throw new AssertionError("WAV exporter test failed", failure);
+        } finally {
+            if (pcm != null) {
+                pcm.delete();
+            }
+            if (wav != null) {
+                wav.delete();
+            }
+        }
+    }
+
+    private static int readIntLE(RandomAccessFile input) throws java.io.IOException {
+        return input.readUnsignedByte()
+                | (input.readUnsignedByte() << 8)
+                | (input.readUnsignedByte() << 16)
+                | (input.readUnsignedByte() << 24);
     }
 
     private static void fillTone(short[] pcm, int start, int end, int amplitude) {
