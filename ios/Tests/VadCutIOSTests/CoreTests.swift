@@ -51,13 +51,13 @@ final class CoreTests: XCTestCase {
         for index in 0..<48_000 {
             resampler.accept(sin(Float(index) * 0.01))
         }
-        XCTAssertEqual(output.count, 16_000, accuracy: 1)
+        assertApproximatelyEqual(output.count, 16_000, accuracy: 1)
         XCTAssertTrue(output.allSatisfy { $0.isFinite && $0 >= -1 && $0 <= 1 })
     }
 }
 
 private extension XCTestCase {
-    func XCTAssertEqual(_ actual: Int, _ expected: Int, accuracy: Int) {
+    func assertApproximatelyEqual(_ actual: Int, _ expected: Int, accuracy: Int) {
         XCTAssertLessThanOrEqual(abs(actual - expected), accuracy)
     }
 }
