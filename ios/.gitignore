@@ -1,0 +1,7 @@
+Pods/
+DerivedData/
+build/
+*.xcworkspace/
+VadCutIOS.xcodeproj/
+xcuserdata/
+*.xcuserstate

@@ -5,7 +5,7 @@
 ```text
 vps/       CPU 后端：VAD + PCM 重建 + M4A/WAV 输出
 android/   完整 Android 离线 SDK：Silero VAD + Media3 + M4A 输出
-ios/       iOS 客户端接口约定和实现计划
+ios/       完整 iOS 离线 SDK：Silero VAD + AVFoundation + M4A 输出
 ```
 
 ## Android 推荐主链路
@@ -41,7 +41,7 @@ VPS 方案适合希望统一模型和阈值、降低客户端包体或跨平台�
 
 - [VPS 服务](vps/README.md)
 - [Android 离线 VAD SDK](android/README.md)
-- [iOS 方案](ios/README.md)
+- [iOS 离线 VAD SDK](ios/README.md)
 
 ## API 契约
 
@@ -75,4 +75,4 @@ Content-Type: audio/mp4
 
 - VPS 版本已经实现并在本地真实音频和 HTTP 接口上验证。
 - Android 已实现完整本地离线 SDK，支持 Silero VAD、能量非静音模式、Android `Uri` 输入和 AAC/M4A 导出；正式投产前仍需完成真机矩阵与长录音压力测试。
-- iOS 保持同一 HTTP 契约，后续使用 AVAudioRecorder/AVAudioEngine + URLSession/原生上传实现。
+- iOS 已实现与 Android 对齐的本地离线 SDK，使用同一 Silero 模型，并由 macOS GitHub Actions 执行 Xcode 模拟器构建、推理和 M4A 端到端测试；正式投产前仍需真实 iPhone 验证。

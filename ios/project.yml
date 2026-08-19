@@ -1,0 +1,46 @@
+name: VadCutIOS
+options:
+  bundleIdPrefix: com.vadcut
+  deploymentTarget:
+    iOS: '15.1'
+settings:
+  base:
+    SWIFT_VERSION: '5.10'
+    CODE_SIGNING_ALLOWED: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  VadCutIOS:
+    type: framework
+    platform: iOS
+    sources:
+      - Sources/VadCutIOS
+    resources:
+      - Sources/VadCutIOS/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vadcut.ios
+        PRODUCT_NAME: VadCutIOS
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+  VadCutIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/VadCutIOSTests
+    resources:
+      - Tests/Fixtures
+    dependencies:
+      - target: VadCutIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vadcut.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  VadCutIOS:
+    build:
+      targets:
+        VadCutIOS: all
+    test:
+      gatherCoverageData: true
+      targets:
+        - VadCutIOSTests

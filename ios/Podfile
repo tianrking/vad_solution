@@ -1,0 +1,13 @@
+platform :ios, '15.1'
+
+use_frameworks! :linkage => :static
+
+project 'VadCutIOS.xcodeproj'
+
+target 'VadCutIOS' do
+  pod 'onnxruntime-objc', '1.28.0'
+
+  target 'VadCutIOSTests' do
+    inherit! :search_paths
+  end
+end
