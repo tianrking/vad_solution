@@ -119,6 +119,90 @@ TrimTask task = VadCut.with(context).trimAsync(request, new TrimListener() {
 默认 `TrimRequest.Builder(...).build()` 使用 `VOICE_MEMO + SPEECH`，因此真实执行
 Silero VAD，而不是能量检测。规则按以下顺序执行：
 
+### 默认 `VOICE_MEMO` 参数速查
+
+| 参数 | 默认值 | 实际作用 |
+| --- | ---: | --- |
+| 检测模式 | `SPEECH` / Silero VAD v6.2.1 | 识别人声，不是普通音量门限 |
+| 检测帧 | 32 ms / 512 samples | 16 kHz 单声道检测流的处理粒度 |
+| 开始说话概率 | `≥ 0.55` | 尚未进入语音时，达到此值才开始语音段 |
+| 继续说话概率 | `≥ 0.35` | 已进入语音后，达到此值就更新最后活动帧 |
+| 确认长静音 | 700 ms | 连续低于 0.35 达到该时长，才确认语音段结束 |
+| 语音前保护 | 180 ms | 在每段检测语音之前额外保留原音频 |
+| 语音后保护 | 250 ms | 在每段检测语音之后额外保留原音频 |
+| 最短语音 | 96 ms | 更短的原始活动段视为瞬态噪声并丢弃 |
+| 切点淡入淡出 | 8 ms | 对最终编辑边界线性淡化，降低爆音风险 |
+| 未检测到人声 | `KEEP_ORIGINAL` | 保留整段并返回 warning，不生成空音频 |
+
+### 默认自动裁剪判定图
+
+```mermaid
+flowchart TD
+    F["读取一帧：32 ms / 512 samples"] --> P["Silero ONNX 输出人声概率 p"]
+    P --> S{"当前是否已进入语音段？"}
+
+    S -- "否" --> START{"p ≥ 0.55？"}
+    START -- "否" --> NEXT{"文件是否还有下一帧？"}
+    START -- "是" --> OPEN["开始新的语音段"]
+    OPEN --> NEXT
+
+    S -- "是" --> ACTIVE{"p ≥ 0.35？"}
+    ACTIVE -- "是" --> UPDATE["更新最后活动帧，并清零静音累计"]
+    UPDATE --> NEXT
+    ACTIVE -- "否" --> QUIET["累计低概率静音时长"]
+    QUIET --> CONFIRM{"累计静音 ≥ 700 ms？"}
+    CONFIRM -- "否" --> NEXT
+    CONFIRM -- "是" --> CLOSE["确认结束；原始终点回到最后活动帧"]
+
+    CLOSE --> MIN{"原始语音段 ≥ 96 ms？"}
+    MIN -- "否" --> DROP["丢弃瞬态短声"]
+    MIN -- "是" --> SAVE["加入有效语音区间集合"]
+    DROP --> NEXT
+    SAVE --> NEXT
+
+    NEXT -- "是" --> F
+    NEXT -- "否，到达文件末尾" --> FINISH["收尾尚未结束的语音段，并应用 96 ms 筛选"]
+    FINISH --> ANY{"是否存在有效语音区间？"}
+    ANY -- "否" --> WHOLE["默认保留整段，并返回 NO_ACTIVITY warning"]
+    ANY -- "是" --> PAD["所有区间前扩 180 ms；后扩 250 ms"]
+    PAD --> MERGE["合并重叠或首尾相接的保留区间"]
+    MERGE --> REMOVE["用完整时间轴减去保留区间，得到删除区间"]
+    REMOVE --> EXPORT["第二遍复制保留 PCM；边界 8 ms 淡化；编码 AAC/M4A"]
+
+    classDef decision fill:#fff7d6,stroke:#b7791f,color:#5f370e;
+    classDef keep fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef remove fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    class START,ACTIVE,CONFIRM,MIN,S,NEXT,ANY decision;
+    class OPEN,UPDATE,SAVE,PAD,MERGE,EXPORT,WHOLE keep;
+    class DROP,REMOVE remove;
+```
+
+### 1.5 秒中间静音示例
+
+```mermaid
+flowchart LR
+    subgraph BEFORE["原始时间轴：两段语音之间静音 1,500 ms"]
+        VA["语音 A"] --> SILENCE["静音 1,500 ms"] --> VB["语音 B"]
+    end
+
+    subgraph AFTER["默认 VOICE_MEMO 规划后"]
+        KA["保留语音 A"] --> PA["保留后保护 250 ms"] --> CUT["删除约 1,070 ms"] --> PB["保留前保护 180 ms"] --> KB["保留语音 B"]
+    end
+
+    SILENCE -. "低于 0.35 持续约 700 ms 后，确认 A 已结束" .-> CUT
+
+    classDef keep fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef remove fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    class VA,VB,KA,PA,PB,KB keep;
+    class CUT remove;
+```
+
+这里的 700 ms 是“确认语音已经结束”的门槛，不是额外强制保留的静音。以上示例在
+整段静音都低于结束阈值、下一段语音重新达到开始阈值的前提下，理论删除量约为
+`1,500 - 250 - 180 = 1,070 ms`；实际边界会受 32 ms 检测帧以及编码帧粒度影响。
+如果两段语音之间的低概率静音不足 700 ms，默认会把它们视为同一个语音段，不执行
+中间切割。padding 后的区间若重叠或首尾相接，也会合并并保留中间内容。
+
 1. `MediaExtractor`/`MediaCodec` 流式解码输入。检测支路混为单声道并重采样到
    16 kHz Float32 PCM，每 `512 samples = 32 ms` 形成一帧；不会把整段录音载入内存。
 2. `SPEECH` 模式把每帧和连续的 recurrent state 送入 Silero VAD v6.2.1 ONNX，
@@ -264,7 +348,8 @@ Android 平台已提供硬件/系统解码器，Media3 Transformer 负责稳定�
 python scripts/verify_elf_alignment.py sample-kotlin/build/outputs/apk/debug/sample-kotlin-debug.apk
 ```
 
-连接真机或启动模拟器后，可运行真实 WAV 的自动 VAD、手动删除区间、手动保留区间三条 Media3 → M4A 全链路设备测试：
+连接真机或启动模拟器后，可运行真实 WAV 的自动 VAD、手动删除区间、手动保留区间，
+以及真人普通话 MP3 长静音裁剪四条 Media3 → M4A 全链路设备测试：
 
 ```bash
 ./gradlew :vadcut:connectedDebugAndroidTest
@@ -304,6 +389,76 @@ python scripts/verify_elf_alignment.py sample-kotlin/build/outputs/apk/debug/sam
   500 ms 误差内。
 - 手动保留、手动删除和自动 Silero 三条测试在该设备上 `3/3` 通过，输出都由
   `MediaExtractor` 重新打开并确认仅含一条可播放 AAC 音轨。
+
+### 真人普通话 MP3 + 4 秒静音结果（2026-08-20）
+
+#### 直接试听裁剪前后
+
+请先播放“裁剪前”，听到两段真人中文之间约 4 秒静音；再播放“裁剪后”，确认这段长静音
+已经消失，但切点两侧仍保留默认的语音后 250 ms 和语音前 180 ms 保护：
+
+| 对比 | 播放或下载 | 内容 | 时长 |
+| --- | --- | --- | ---: |
+| ① 裁剪前 | [▶ `mandarin-silence-demo.mp3`](vadcut/src/androidTest/assets/mandarin-silence-demo.mp3?raw=1) | 真人中文 A + 4.000 秒数字静音 + 真人中文 B | 15.200 秒 |
+| ② 裁剪后 | [▶ `mandarin-silence-demo-after-android.m4a`](demo-audio/mandarin-silence-demo-after-android.m4a?raw=1) | OPPO PEGM10 真机运行当前 Android SDK 的输出 | 9.948 秒实际播放；Android 轨道报告 10.048 秒 |
+
+裁剪后文件不是电脑端按时间点预制的结果：它由下方同一个 connected-device 专项测试启用
+`vadcut.exportMandarinOutput=true` 后，从手机应用外部文件目录原样拉取。其 SHA-256 为
+`f8f03f98834771577ee58e81d1b38706ef1cbdc29926b6ffa717433882ae62e2`，完整设备、参数、区间、
+哈希和复验结果记录在
+[`mandarin-silence-demo-after-android.json`](demo-audio/mandarin-silence-demo-after-android.json)。
+FFmpeg 完整解码无错误，并且以 -50 dB、连续 500 ms 为条件未再发现长静音。
+
+Android `MediaExtractor` 报告 10.048 秒，桌面 FFprobe/播放器报告 9.948 秒，两者相差的
+100 ms 对应输出 AAC 的 1,600 samples encoder delay；这不是又被剪掉了 100 ms。
+
+#### 输入来源与裁剪结果
+
+测试输入也可从仓库直接[查看 `mandarin-silence-demo.mp3`](vadcut/src/androidTest/assets/mandarin-silence-demo.mp3)。
+它不是 TTS，也不是生成的概率数组：两段真人普通话来自
+[Google FLEURS](https://huggingface.co/datasets/google/fleurs) 的 `cmn_hans_cn/validation`
+分片，中间插入精确 4.000 秒数字静音；FLEURS 数据集许可证为
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)。测试 asset 不会进入发布 AAR。
+
+使用的两条转写是：
+
+1. “因为远离大陆，哺乳动物无法长途跋涉而来，使得巨龟成为科隆群岛主要的食草动物。”
+2. “迦南没有大森林，所以木材非常昂贵。”
+
+组成后的文件为 16 kHz、mono、64 kbps MP3，时长 15.200 秒、大小 122,949 B，
+SHA-256 为 `3fb81d09f37e7648559009a9a324b31a0fb1558fe6aaef14947b9e18a366e0d7`。
+已知插入静音位于原时间轴 `[7110, 11110)` ms；FFmpeg 以 -50 dB 独立检测到
+`[7061, 11158)` ms、约 4.097 秒低能量区间。完整来源、源文件哈希、裁取范围和组成时间轴
+记录在 [`mandarin-silence-demo.json`](vadcut/src/androidTest/assets/mandarin-silence-demo.json)，
+归属与修改声明记录在 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+OPPO PEGM10 / Android 13 / `arm64-v8a` 使用默认 `VOICE_MEMO + SPEECH` 真机执行得到：
+
+```text
+保留区间：[556, 7002)、[11564, 15194) ms
+删除区间：[0, 556)、[7002, 11564)、[15194, 15200) ms
+输入时长：15,200 ms
+规划输出：10,076 ms
+容器实测输出：10,048 ms
+删除时长：5,124 ms（33.7%）
+```
+
+中央删除区间 `[7002, 11564)` 完整覆盖已知的 4 秒插入静音 `[7110, 11110)`，并且
+前后两段真人中文分别形成两个保留区间。新增回归测试会明确断言这两点，并重新打开输出
+确认只有一条可播放 AAC 音轨。
+
+| 文件 | 规划/输入时长 | 容器实测时长 | 文件大小 |
+| --- | ---: | ---: | ---: |
+| 测试输入 MP3 | 15,200 ms | 15,200 ms | 122,949 B |
+| 完整 M4A（同编码对照） | 15,200 ms | 15,168 ms | 185,495 B |
+| Silero 裁剪 M4A | 10,076 ms | Android 10,048 ms；FFprobe 播放 9,948 ms | 123,095 B |
+
+- 对比完整 M4A：时长减少 `5,124 ms / 33.7%`，文件减少 `62,400 B / 33.6%`。
+- 输入 MP3 与输出 M4A 的编码和目标码率不同，所以不能拿二者的字节数直接衡量裁剪收益；
+  公平的文件大小比较必须使用上表的完整 M4A 同编码对照。
+- 正式 Gradle connected-device 报告中，中文 MP3 专项测试耗时 7.704 秒；包含原 WAV
+  自动裁剪和两条手动区间测试的完整套件为 `4 tests / 0 failures / 0 errors`，
+  测试体总耗时 12.954 秒。
 
 本轮还修复了 Media3 1.11.0 默认 streamable MP4 预留约 398 KB `free` box 的问题；
 官方文档明确说明启用该选项会增大文件，较小文件应设为 `false`，见

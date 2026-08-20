@@ -76,6 +76,84 @@ class EndToEndInstrumentedTest {
     }
 
     @Test
+    fun trimsInsertedSilenceFromRealMandarinMp3() = runBlocking<Unit> {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val input = File(context.cacheDir, "vadcut-mandarin-silence-input.mp3")
+        val output = File(context.cacheDir, "vadcut-mandarin-silence-output.m4a")
+        val untrimmedOutput = File(context.cacheDir, "vadcut-mandarin-silence-untrimmed.m4a")
+        instrumentation.context.assets.open("mandarin-silence-demo.mp3").use { source ->
+            input.outputStream().use(source::copyTo)
+        }
+        output.delete()
+        untrimmedOutput.delete()
+
+        try {
+            val result = withTimeout(120_000L) {
+                VadCut.with(context).trim(
+                    TrimRequest.Builder(Uri.fromFile(input), Uri.fromFile(output))
+                        .setConfig(TrimConfig.fromPreset(TrimPreset.VOICE_MEMO))
+                        .build(),
+                )
+            }
+
+            assertTrue(result.inputDurationMs in 15_000L..15_400L)
+            assertTrue(result.removedDurationMs >= INSERTED_SILENCE_DURATION_MS)
+            assertTrue(result.outputDurationMs <= result.inputDurationMs - INSERTED_SILENCE_DURATION_MS)
+            assertEquals(2, result.keptRanges.size)
+            assertTrue(
+                result.removedRanges.any { range ->
+                    range.startTimeMs <= INSERTED_SILENCE_START_MS &&
+                        range.endTimeMs >= INSERTED_SILENCE_END_MS
+                },
+            )
+            assertTrue(result.warnings.isEmpty())
+            val encodedDurationMs = assertPlayableAudio(output)
+            assertTrue(kotlin.math.abs(encodedDurationMs - result.outputDurationMs) <= 500L)
+
+            val untrimmedResult = withTimeout(120_000L) {
+                VadCut.with(context).trim(
+                    TrimRequest.Builder(Uri.fromFile(input), Uri.fromFile(untrimmedOutput))
+                        .setKeptRanges(AudioRange(0L, result.inputDurationMs))
+                        .build(),
+                )
+            }
+            val untrimmedEncodedDurationMs = assertPlayableAudio(untrimmedOutput)
+            assertEquals(result.inputDurationMs, untrimmedResult.outputDurationMs)
+            assertTrue(kotlin.math.abs(untrimmedEncodedDurationMs - result.inputDurationMs) <= 500L)
+            assertTrue(output.length() < untrimmedOutput.length())
+
+            Log.i(
+                METRICS_TAG,
+                "fixture=mandarin-silence-demo.mp3 mode=SPEECH preset=VOICE_MEMO " +
+                    "inputDurationMs=${result.inputDurationMs} outputDurationMs=${result.outputDurationMs} " +
+                    "encodedDurationMs=$encodedDurationMs removedDurationMs=${result.removedDurationMs} " +
+                    "inputMp3Bytes=${input.length()} untrimmedM4aBytes=${untrimmedOutput.length()} " +
+                    "trimmedM4aBytes=${output.length()} keptRanges=${result.keptRanges} " +
+                    "removedRanges=${result.removedRanges}",
+            )
+
+            if (
+                InstrumentationRegistry.getArguments().getString(EXPORT_MANDARIN_OUTPUT_ARG)
+                    .equals("true", ignoreCase = true)
+            ) {
+                val exportDirectory = checkNotNull(context.getExternalFilesDir(null)) {
+                    "External files directory is unavailable"
+                }
+                val exportedOutput = File(exportDirectory, EXPORTED_MANDARIN_OUTPUT_FILE)
+                output.copyTo(exportedOutput, overwrite = true)
+                assertEquals(output.length(), exportedOutput.length())
+                assertPlayableAudio(exportedOutput)
+                Log.i(METRICS_TAG, "exportedMandarinOutput=${exportedOutput.absolutePath}")
+            }
+        } finally {
+            input.delete()
+            output.delete()
+            untrimmedOutput.delete()
+        }
+    }
+
+    @Test
     fun manuallyRemovesRequestedOriginalTimelineRanges() = runBlocking<Unit> {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -181,5 +259,10 @@ class EndToEndInstrumentedTest {
 
     private companion object {
         const val METRICS_TAG = "VadCutE2E"
+        const val INSERTED_SILENCE_START_MS = 7_110L
+        const val INSERTED_SILENCE_END_MS = 11_110L
+        const val INSERTED_SILENCE_DURATION_MS = INSERTED_SILENCE_END_MS - INSERTED_SILENCE_START_MS
+        const val EXPORT_MANDARIN_OUTPUT_ARG = "vadcut.exportMandarinOutput"
+        const val EXPORTED_MANDARIN_OUTPUT_FILE = "mandarin-silence-demo-after-android.m4a"
     }
 }

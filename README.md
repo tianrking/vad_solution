@@ -222,5 +222,5 @@ Content-Type: audio/mp4
 ## 当前状态
 
 - VPS 版本已经实现并在本地真实音频和 HTTP 接口上验证。
-- Android 已实现完整本地离线 SDK，支持 Silero VAD、能量非静音模式、手动区间、Android `Uri` 输入和紧凑 AAC/M4A 导出；OPPO Android 13 `arm64-v8a` 真机已通过真实声音自动裁剪、同编码体积对照、手动保留/删除 `3/3` 全链路测试，其他 ABI 当前仍是打包/构建证据，正式投产前仍需完成多机型矩阵与长录音压力测试。
+- Android 已实现完整本地离线 SDK，支持 Silero VAD、能量非静音模式、手动区间、Android `Uri` 输入和紧凑 AAC/M4A 导出；OPPO Android 13 `arm64-v8a` 真机已通过真实 WAV、真人普通话 MP3 + 4 秒静音、同编码体积对照和手动保留/删除 `4/4` 全链路测试，其他 ABI 当前仍是打包/构建证据，正式投产前仍需完成多机型矩阵与长录音压力测试。
 - iOS 已实现与 Android 对齐的本地离线 SDK，使用同一 Silero 模型，并由 macOS GitHub Actions 执行 Xcode 模拟器构建、推理和 M4A 端到端测试；正式投产前仍需真实 iPhone 验证。

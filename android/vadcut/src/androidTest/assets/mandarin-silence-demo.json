@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "artifact": {
+    "fileName": "mandarin-silence-demo.mp3",
+    "sha256": "3fb81d09f37e7648559009a9a324b31a0fb1558fe6aaef14947b9e18a366e0d7",
+    "bytes": 122949,
+    "codec": "MP3",
+    "sampleRateHz": 16000,
+    "channels": 1,
+    "bitRate": "64 kbps",
+    "durationMs": 15200
+  },
+  "source": {
+    "dataset": "google/fleurs",
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "config": "cmn_hans_cn",
+    "split": "validation",
+    "license": "CC BY 4.0",
+    "rows": [
+      {
+        "rowIndex": 1,
+        "id": 1605,
+        "sourceSamples": 119040,
+        "sourceSha256": "577a635c2261680c61dda5fecbc4f83bff6f37f453665b8d9d1a68f210f57c0a",
+        "usedRangeMs": [0, 7110],
+        "transcript": "因为远离大陆，哺乳动物无法长途跋涉而来，使得巨龟成为科隆群岛主要的食草动物。"
+      },
+      {
+        "rowIndex": 3,
+        "id": 1648,
+        "sourceSamples": 154560,
+        "sourceSha256": "28502266dfa1c0c5202d1488015b29ca0d26fafbf3540cae61f112508caf1ded",
+        "usedRangeMs": [2480, 6570],
+        "transcript": "迦南没有大森林，所以木材非常昂贵。"
+      }
+    ]
+  },
+  "composition": [
+    {
+      "type": "source",
+      "rowIndex": 1,
+      "outputRangeMs": [0, 7110]
+    },
+    {
+      "type": "digitalSilence",
+      "outputRangeMs": [7110, 11110]
+    },
+    {
+      "type": "source",
+      "rowIndex": 3,
+      "outputRangeMs": [11110, 15200]
+    }
+  ],
+  "modifications": "Trimmed only outer silence from the two source utterances, inserted 4.000 seconds of generated digital silence, concatenated in the listed order, and encoded as 16 kHz mono 64 kbps MP3."
+}

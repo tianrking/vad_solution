@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "description": "Android on-device VadCut output for the real Mandarin plus 4-second silence fixture",
+  "generatedAt": "2026-08-20T14:37:32+08:00",
+  "sdk": {
+    "version": "0.2.0",
+    "sourceCommit": "7adcb13cddc454010739b983bdb450c7f3cccbab",
+    "mode": "SPEECH",
+    "preset": "VOICE_MEMO",
+    "vad": "Silero VAD v6.2.1 through ONNX Runtime Android 1.28.0"
+  },
+  "device": {
+    "manufacturer": "OPPO",
+    "model": "PEGM10",
+    "androidVersion": "13",
+    "apiLevel": 33,
+    "abi": "arm64-v8a",
+    "buildFingerprint": "OPPO/PEGM10/OP4E59:13/TP1A.220905.001/R.1b958fb_1-1:user/release-keys"
+  },
+  "input": {
+    "path": "../vadcut/src/androidTest/assets/mandarin-silence-demo.mp3",
+    "durationMs": 15200,
+    "bytes": 122949,
+    "sha256": "3fb81d09f37e7648559009a9a324b31a0fb1558fe6aaef14947b9e18a366e0d7",
+    "insertedSilenceRangeMs": [7110, 11110]
+  },
+  "output": {
+    "path": "mandarin-silence-demo-after-android.m4a",
+    "plannedDurationMs": 10076,
+    "androidMediaExtractorDurationMs": 10048,
+    "ffprobePlaybackDurationMs": 9948,
+    "aacEncoderDelaySamples": 1600,
+    "sampleRateHz": 16000,
+    "channels": 1,
+    "codec": "AAC-LC in M4A",
+    "bytes": 123095,
+    "sha256": "f8f03f98834771577ee58e81d1b38706ef1cbdc29926b6ffa717433882ae62e2",
+    "keptRangesMs": [[556, 7002], [11564, 15194]],
+    "removedRangesMs": [[0, 556], [7002, 11564], [15194, 15200]],
+    "removedDurationMs": 5124
+  },
+  "verification": {
+    "instrumentationTest": "EndToEndInstrumentedTest.trimsInsertedSilenceFromRealMandarinMp3",
+    "instrumentationResult": "passed",
+    "ffmpegDecode": "passed",
+    "ffmpegSilenceDetect": {
+      "thresholdDb": -50,
+      "minimumDurationMs": 500,
+      "matchingRegions": []
+    }
+  }
+}
