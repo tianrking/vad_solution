@@ -2,7 +2,22 @@
 
 独立的 CPU 音频处理服务：上传音频，识别并删除长静音段，返回处理后的 M4A 或 WAV。
 
-首版使用 WebRTC VAD，不依赖 GPU 或神经网络模型。VAD 使用 16 kHz 单声道 PCM 做分析；最终输出使用输入音频的采样率和声道数，避免无必要地降低录音质量。
+首版使用 `webrtcvad-wheels==2.0.14` 提供的 WebRTC VAD，不依赖 GPU 或神经网络模型。VAD 使用 16 kHz 单声道 PCM S16LE 做分析；最终输出使用输入音频的采样率和声道数，避免无必要地降低录音质量。
+
+这里的“PCM 重建”不是模型生成或音频修复，实际处理链为：
+
+```text
+上传的音频
+    → FFprobe 读取第一条音轨的时长、采样率和声道数
+    → FFmpeg 解码为 16 kHz / 单声道 / PCM S16LE 分析流
+    → WebRTC VAD 按 10、20 或 30 ms 帧输出语音/非语音判断
+    → Python 合并语音帧，并按参数保留短停顿和语音边界
+    → FFmpeg 再按输入原采样率和原声道数解码 PCM S16LE
+    → Python 按帧字节偏移 seek/read/write，顺序拼接全部保留区间
+    → FFmpeg 默认编码 128 kbps AAC/M4A，或封装 PCM S16LE/WAV
+```
+
+因此，不同 CPU 架构不需要不同的 VAD 模型；服务依赖 CPU 版 WebRTC VAD Python 扩展和 FFmpeg。当前 PCM 拼接是硬切区间字节拷贝，没有使用波形生成模型，也没有做淡入淡出或交叉淡化。
 
 ## 本地运行
 
