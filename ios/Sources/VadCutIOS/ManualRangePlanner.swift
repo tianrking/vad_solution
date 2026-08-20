@@ -45,10 +45,13 @@ enum ManualRangePlanner {
         durationMicroseconds: Int64
     ) throws -> [TimeRangeUs] {
         let durationMilliseconds = roundedMilliseconds(durationMicroseconds)
-        let converted = try ranges.map { range -> TimeRangeUs in
+        var converted: [TimeRangeUs] = []
+        converted.reserveCapacity(ranges.count)
+        for range in ranges {
             guard range.endMilliseconds <= durationMilliseconds else {
+                let bounds = "[\(range.startMilliseconds), \(range.endMilliseconds))"
                 throw invalid(
-                    "Manual trim range [\(range.startMilliseconds), \(range.endMilliseconds)) exceeds " +
+                    "Manual trim range \(bounds) exceeds " +
                     "the input duration of \(durationMilliseconds) ms"
                 )
             }
@@ -65,16 +68,20 @@ enum ManualRangePlanner {
                 : scaledEndMicroseconds
             guard startMicroseconds < durationMicroseconds,
                   endMicroseconds > startMicroseconds else {
+                let bounds = "[\(range.startMilliseconds), \(range.endMilliseconds))"
                 throw invalid(
-                    "Manual trim range [\(range.startMilliseconds), \(range.endMilliseconds)) is outside " +
+                    "Manual trim range \(bounds) is outside " +
                     "the input duration of \(durationMilliseconds) ms"
                 )
             }
-            return TimeRangeUs(
-                start: startMicroseconds,
-                end: min(endMicroseconds, durationMicroseconds)
+            converted.append(
+                TimeRangeUs(
+                    start: startMicroseconds,
+                    end: min(endMicroseconds, durationMicroseconds)
+                )
             )
-        }.sorted { lhs, rhs in
+        }
+        converted.sort { lhs, rhs in
             lhs.start == rhs.start ? lhs.end < rhs.end : lhs.start < rhs.start
         }
 
