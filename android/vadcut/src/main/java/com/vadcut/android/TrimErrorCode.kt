@@ -2,6 +2,7 @@ package com.vadcut.android
 
 enum class TrimErrorCode {
     INVALID_REQUEST,
+    INVALID_TIME_RANGES,
     INPUT_OPEN_FAILED,
     NO_AUDIO_TRACK,
     UNSUPPORTED_AUDIO_FORMAT,

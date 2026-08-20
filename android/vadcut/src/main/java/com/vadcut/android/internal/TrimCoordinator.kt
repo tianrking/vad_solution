@@ -33,7 +33,7 @@ internal class TrimCoordinator(private val context: Context) {
         validate(request)
         emitProgress(onProgress, TrimPhase.ANALYZING, 0, 0L, 0L)
 
-        val analysis = analyzer.analyze(request.inputUri, request.config) { processedUs, totalUs ->
+        val analysisProgress: suspend (Long, Long) -> Unit = { processedUs, totalUs ->
             val analysisPercent = if (totalUs > 0L) {
                 ((processedUs.coerceAtMost(totalUs) * ANALYSIS_WEIGHT) / totalUs).toInt()
             } else {
@@ -47,23 +47,32 @@ internal class TrimCoordinator(private val context: Context) {
                 totalUs / 1_000L,
             )
         }
+        val analysis = if (request.manualTrimPlan == null) {
+            analyzer.analyze(request.inputUri, request.config, analysisProgress)
+        } else {
+            analyzer.analyzeDuration(request.inputUri, analysisProgress)
+        }
 
         val warnings = mutableListOf<TrimWarning>()
         if (!analysis.durationWasKnown) warnings += TrimWarning.INPUT_DURATION_UNKNOWN
-        val keptRanges = if (analysis.keptRanges.isEmpty()) {
-            when (request.config.noSpeechPolicy) {
-                NoSpeechPolicy.FAIL -> throw TrimException(
-                    TrimErrorCode.NO_SPEECH_DETECTED,
-                    "No requested audio activity was detected",
-                )
+        val keptRanges = request.manualTrimPlan?.let { manualPlan ->
+            ManualRangePlanner.resolveKeptRanges(manualPlan, analysis.durationUs)
+        } ?: run {
+            if (analysis.keptRanges.isEmpty()) {
+                when (request.config.noSpeechPolicy) {
+                    NoSpeechPolicy.FAIL -> throw TrimException(
+                        TrimErrorCode.NO_SPEECH_DETECTED,
+                        "No requested audio activity was detected",
+                    )
 
-                NoSpeechPolicy.KEEP_ORIGINAL -> {
-                    warnings += TrimWarning.NO_ACTIVITY_DETECTED_KEPT_ORIGINAL
-                    listOf(TimeRangeUs(0L, analysis.durationUs))
+                    NoSpeechPolicy.KEEP_ORIGINAL -> {
+                        warnings += TrimWarning.NO_ACTIVITY_DETECTED_KEPT_ORIGINAL
+                        listOf(TimeRangeUs(0L, analysis.durationUs))
+                    }
                 }
+            } else {
+                analysis.keptRanges
             }
-        } else {
-            analysis.keptRanges
         }
 
         emitProgress(
@@ -176,6 +185,8 @@ internal class TrimCoordinator(private val context: Context) {
             }
         } catch (error: TrimException) {
             throw error
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             throw TrimException(TrimErrorCode.OUTPUT_WRITE_FAILED, "Unable to write output URI", error)
         }
@@ -194,20 +205,12 @@ internal class TrimCoordinator(private val context: Context) {
         private const val ANALYSIS_WEIGHT = 60
         private const val EXPORT_WEIGHT = 35
 
-        internal fun complement(ranges: List<TimeRangeUs>, durationUs: Long): List<TimeRangeUs> {
-            val result = mutableListOf<TimeRangeUs>()
-            var cursor = 0L
-            for (range in ranges) {
-                if (range.startUs > cursor) result += TimeRangeUs(cursor, range.startUs)
-                cursor = maxOf(cursor, range.endUs)
-            }
-            if (cursor < durationUs) result += TimeRangeUs(cursor, durationUs)
-            return result
-        }
+        internal fun complement(ranges: List<TimeRangeUs>, durationUs: Long): List<TimeRangeUs> =
+            ManualRangePlanner.complement(ranges, durationUs)
 
         private fun toPublicRange(range: TimeRangeUs): AudioRange =
             AudioRange(usToRoundedMs(range.startUs), usToRoundedMs(range.endUs))
 
-        private fun usToRoundedMs(valueUs: Long): Long = (valueUs + 500L) / 1_000L
+        private fun usToRoundedMs(valueUs: Long): Long = ManualRangePlanner.usToRoundedMs(valueUs)
     }
 }

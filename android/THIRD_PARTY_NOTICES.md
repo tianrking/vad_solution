@@ -1,6 +1,6 @@
 # Third-party notices
 
-VadCut Android 0.1.0 uses the following third-party components. They are not relicensed by the VadCut Apache-2.0 license.
+VadCut Android 0.2.0 uses the following third-party components. They are not relicensed by the VadCut Apache-2.0 license.
 
 ## Silero VAD
 

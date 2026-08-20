@@ -44,6 +44,6 @@ class VadCut private constructor(context: Context) {
         @JvmStatic
         fun with(context: Context): VadCut = VadCut(context)
 
-        const val VERSION: String = "0.1.0"
+        const val VERSION: String = "0.2.0"
     }
 }

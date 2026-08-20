@@ -1,9 +1,11 @@
 package com.vadcut.sample.kotlin
 
 import android.app.Activity
+import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
@@ -13,6 +15,7 @@ import com.vadcut.android.TrimRequest
 import com.vadcut.android.TrimTask
 import com.vadcut.android.TrimConfig
 import com.vadcut.android.VadCut
+import java.io.File
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
@@ -89,18 +92,39 @@ class MainActivity : Activity() {
                 }
 
                 override fun onSuccess(result: com.vadcut.android.TrimResult) {
+                    task = null
                     status.text = "完成：删除 ${result.removedDurationMs / 1000.0} 秒，输出 $output"
                 }
 
                 override fun onError(error: com.vadcut.android.TrimException) {
+                    task = null
+                    deleteCreatedOutput(output)
                     status.text = "失败 [${error.code}]：${error.message}"
                 }
 
                 override fun onCancelled() {
+                    task = null
+                    deleteCreatedOutput(output)
                     status.text = "已取消"
                 }
             },
         )
+    }
+
+    private fun deleteCreatedOutput(output: Uri) {
+        // ACTION_CREATE_DOCUMENT created this URI specifically for the current task.
+        runCatching {
+            when (output.scheme) {
+                ContentResolver.SCHEME_CONTENT -> {
+                    if (DocumentsContract.isDocumentUri(this, output)) {
+                        DocumentsContract.deleteDocument(contentResolver, output)
+                    } else {
+                        contentResolver.delete(output, null, null)
+                    }
+                }
+                ContentResolver.SCHEME_FILE -> output.path?.let { File(it).delete() }
+            }
+        }
     }
 
     companion object {

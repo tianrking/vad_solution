@@ -2,12 +2,13 @@
 
 完全在 Android 本地运行的长录音语音/静音裁剪 SDK。输入任意 Android `Uri`，SDK 流式解码、检测、拼接并输出 AAC/M4A；不上传音频，不需要 FFmpeg，也不需要存储权限。
 
-当前版本：`0.1.0`
+当前版本：`0.2.0`
 
 ## 能力与边界
 
 - `SPEECH`：使用随包提供的 Silero VAD v6.2.1，只保留人声，适合会议、采访、语音备忘录。
 - `NON_SILENCE`：使用 RMS 能量检测，保留人声、音乐和其他非静音声音。
+- 手动区间：调用方可传入原录音时间轴上的“删除区间”或“保留区间”，SDK 校验、排序、合并后导出。
 - 长音频采用两遍流式处理。PCM 缓冲区大小固定，不把整段录音载入内存；区间元数据随剪切点数量增长。
 - 输出固定为 AAC 音轨的 M4A 文件；有视频轨的输入会只导出音频。
 - Android 7.0+（API 24），支持 `arm64-v8a`、`armeabi-v7a`，并提供 `x86_64` 模拟器支持。
@@ -16,7 +17,7 @@
 
 ## 推荐集成：本地 Maven 仓库
 
-将交付包 `vadcut-maven-0.1.0.zip` 解压到项目目录，例如 `third_party/vadcut-maven`，然后在 `settings.gradle.kts` 中添加：
+将交付包 `vadcut-maven-0.2.0.zip` 解压到项目目录，例如 `third_party/vadcut-maven`，然后在 `settings.gradle.kts` 中添加：
 
 ```kotlin
 dependencyResolutionManagement {
@@ -32,11 +33,17 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.vadcut:vadcut-android:0.1.0")
+    implementation("com.vadcut:vadcut-android:0.2.0")
 }
 ```
 
 Maven 方式会自动带入 Media3、ONNX Runtime 和 Kotlin Coroutines 的传递依赖。SDK 自身不声明任何 Android 权限。
+
+宿主项目需在 `gradle.properties` 启用 AndroidX：
+
+```properties
+android.useAndroidX=true
+```
 
 如果只能使用裸 AAR，把 `vadcut-release.aar` 放进 `app/libs` 后，还必须显式加入这些运行时依赖：
 
@@ -67,10 +74,13 @@ val task = VadCut.with(context).trimAsync(request, object : TrimListener {
     }
 
     override fun onError(error: TrimException) {
+        // 若 outputUri 是专为本任务新建的文档，应在这里删除它。
         println("${error.code}: ${error.message}")
     }
 
-    override fun onCancelled() = Unit
+    override fun onCancelled() {
+        // 删除本任务新建的 outputUri，避免留下 0 字节或部分文件。
+    }
 })
 
 // 需要时取消：
@@ -96,12 +106,72 @@ TrimRequest request = new TrimRequest.Builder(inputUri, outputUri)
 TrimTask task = VadCut.with(context).trimAsync(request, new TrimListener() {
     @Override public void onProgress(TrimProgress progress) { }
     @Override public void onSuccess(TrimResult result) { }
-    @Override public void onError(TrimException error) { }
-    @Override public void onCancelled() { }
+    @Override public void onError(TrimException error) { /* cleanup newly-created outputUri */ }
+    @Override public void onCancelled() { /* cleanup newly-created outputUri */ }
 });
 ```
 
 完整的可运行示例位于 `sample-kotlin` 和 `sample-java`。
+
+## 自定义切割时间点
+
+时间点始终基于**原始输入音频**，单位为毫秒；区间是半开区间 `[startTimeMs, endTimeMs)`。两种模式互斥：
+
+- `setRemovedRanges(...)`：删除给定区间，保留其余内容。
+- `setKeptRanges(...)`：只保留给定区间，删除其余内容。
+
+Kotlin 删除指定区间：
+
+```kotlin
+val request = TrimRequest.Builder(inputUri, outputUri)
+    .setRemovedRanges(
+        AudioRange(5_200, 8_600),
+        AudioRange(15_300, 21_100),
+    )
+    .setConfig(TrimConfig.Builder().setFadeDurationMs(8).build())
+    .build()
+```
+
+Kotlin 只保留指定区间：
+
+```kotlin
+val request = TrimRequest.Builder(inputUri, outputUri)
+    .setKeptRanges(
+        listOf(
+            AudioRange(1_000, 4_000),
+            AudioRange(8_000, 12_500),
+        )
+    )
+    .build()
+```
+
+Java：
+
+```java
+List<AudioRange> removed = Arrays.asList(
+        new AudioRange(5_200L, 8_600L),
+        new AudioRange(15_300L, 21_100L)
+);
+TrimRequest request = new TrimRequest.Builder(inputUri, outputUri)
+        .setManualTrimPlan(ManualTrimPlan.removeRanges(removed))
+        .build();
+```
+
+手动区间规则：
+
+1. 区间可乱序、重叠或首尾相接；SDK 会排序并合并。
+2. 区间必须为正长度，且不能超过解码得到的原音频时长。
+3. 不允许删除整段音频；这种请求返回 `INVALID_TIME_RANGES`，不会生成一个伪装成功的空音频。
+4. 手动模式不会加载或运行 Silero/能量检测器；`TrimConfig` 中仅 `fadeDurationMs` 影响切点，其余检测参数被忽略。
+5. `TrimResult.keptRanges` 和 `removedRanges` 返回最终规范化后、真正用于导出的原时间轴区间。
+6. 在同一个 Builder 上多次设置手动模式时，最后一次设置生效；调用 `useAutomaticDetection()` 可恢复自动 VAD/能量检测。
+
+编译过的调用示例分别位于：
+
+```text
+sample-kotlin/.../ManualTrimExamples.kt
+sample-java/.../ManualTrimExamples.java
+```
 
 ## 参数选择
 
@@ -130,7 +200,9 @@ val config = TrimConfig.Builder()
 
 SDK 不擅自创建 Service 或通知。前台页面内可直接使用 `TrimTask`；需要在锁屏、切后台或进程重启后继续的长任务，应由宿主应用放入 WorkManager 或 Foreground Service，并持久化 SAF URI 权限。不要把输入和输出设为同一个 URI。
 
-处理需要两遍完整读取：第一遍检测区间，第二遍解码、删除区间并只编码一次 AAC。实际速度与耗电取决于 SoC、输入编解码器和录音时长。缓存目录必须容纳一份完整的临时 M4A；写入最终 URI 后临时文件会删除。
+`ACTION_CREATE_DOCUMENT` 会在处理开始前先创建目标。取消或失败时，宿主只应删除“专为当前任务新建”的输出 Uri；Document Uri 优先使用 `DocumentsContract.deleteDocument()`，普通 `ContentResolver.delete()` 在部分厂商 Downloads Provider 上不会真正删除。Kotlin/Java Example 已包含并真机验证这套清理逻辑。
+
+处理需要两遍完整读取：自动模式第一遍检测区间；手动模式第一遍只解码并取得准确时长，不加载 Silero；第二遍删除区间并只编码一次 AAC。实际速度与耗电取决于 SoC、输入编解码器和录音时长。缓存目录必须容纳一份完整的临时 M4A；写入最终 URI 后临时文件会删除。
 
 ## 体积成本
 
@@ -158,7 +230,7 @@ Android 平台已提供硬件/系统解码器，Media3 Transformer 负责稳定�
 python scripts/verify_elf_alignment.py sample-kotlin/build/outputs/apk/debug/sample-kotlin-debug.apk
 ```
 
-连接真机或启动模拟器后，可运行包含真实 WAV → VAD → Media3 → M4A 全链路的设备测试：
+连接真机或启动模拟器后，可运行真实 WAV 的自动 VAD、手动删除区间、手动保留区间三条 Media3 → M4A 全链路设备测试：
 
 ```bash
 ./gradlew :vadcut:connectedDebugAndroidTest

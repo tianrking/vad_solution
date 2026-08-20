@@ -1,9 +1,11 @@
 package com.vadcut.sample.java;
 
 import android.app.Activity;
+import android.content.ContentResolver;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -18,6 +20,8 @@ import com.vadcut.android.TrimRequest;
 import com.vadcut.android.TrimResult;
 import com.vadcut.android.TrimTask;
 import com.vadcut.android.VadCut;
+
+import java.io.File;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_INPUT = 100;
@@ -92,18 +96,41 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onSuccess(TrimResult result) {
+                task = null;
                 status.setText("Done. Removed " + result.getRemovedDurationMs() + " ms; output: " + output);
             }
 
             @Override
             public void onError(TrimException error) {
+                task = null;
+                deleteCreatedOutput(output);
                 status.setText("Failed [" + error.getCode() + "]: " + error.getMessage());
             }
 
             @Override
             public void onCancelled() {
+                task = null;
+                deleteCreatedOutput(output);
                 status.setText("Cancelled");
             }
         });
+    }
+
+    private void deleteCreatedOutput(Uri output) {
+        // ACTION_CREATE_DOCUMENT created this URI specifically for the current task.
+        try {
+            if (ContentResolver.SCHEME_CONTENT.equals(output.getScheme())) {
+                if (DocumentsContract.isDocumentUri(this, output)) {
+                    DocumentsContract.deleteDocument(getContentResolver(), output);
+                } else {
+                    getContentResolver().delete(output, null, null);
+                }
+            } else if (ContentResolver.SCHEME_FILE.equals(output.getScheme()) && output.getPath() != null) {
+                //noinspection ResultOfMethodCallIgnored
+                new File(output.getPath()).delete();
+            }
+        } catch (Exception ignored) {
+            // Best-effort cleanup; the provider may have revoked the grant.
+        }
     }
 }
