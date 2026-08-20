@@ -1,0 +1,65 @@
+name: Linux service
+
+on:
+  push:
+    paths:
+      - "linux/**"
+      - ".github/workflows/linux-service.yml"
+      - "README.md"
+      - "README_EN.md"
+      - "android/vadcut/src/androidTest/assets/mandarin-silence-demo.mp3"
+  pull_request:
+    paths:
+      - "linux/**"
+      - ".github/workflows/linux-service.yml"
+      - "README.md"
+      - "README_EN.md"
+      - "android/vadcut/src/androidTest/assets/mandarin-silence-demo.mp3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-service-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python, real audio, and container
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            linux/requirements.txt
+            linux/requirements-dev.txt
+
+      - name: Install FFmpeg and Python dependencies
+        working-directory: linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Compile and test
+        working-directory: linux
+        run: |
+          python -m pip check
+          python -m compileall -q app tests
+          python -m ruff check app tests
+          python -m ruff format --check app tests
+          python -m pytest -q
+
+      - name: Build Linux container
+        working-directory: linux
+        run: docker build --tag vad-solution-linux:${{ github.sha }} .

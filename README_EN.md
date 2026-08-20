@@ -5,6 +5,7 @@
 <!-- markdownlint-disable MD013 -->
 
 [![iOS SDK CI](https://github.com/tianrking/vad_solution/actions/workflows/ios-sdk.yml/badge.svg)](https://github.com/tianrking/vad_solution/actions/workflows/ios-sdk.yml)
+[![Linux service CI](https://github.com/tianrking/vad_solution/actions/workflows/linux-service.yml/badge.svg)](https://github.com/tianrking/vad_solution/actions/workflows/linux-service.yml)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
 ![Android](https://img.shields.io/badge/Android-API%2024%2B-3DDC84?logo=android&logoColor=white)
@@ -18,7 +19,7 @@
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 
 VadCut implements the same workflow—input recording, activity detection, long-silence removal,
-and complete audio reconstruction—in three independent forms: a VPS HTTP service, an offline
+and complete audio reconstruction—in three independent forms: a Linux HTTP service, an offline
 Android SDK, and an offline iOS SDK. They solve the same product problem but intentionally use
 different VAD and media stacks for their deployment environments.
 
@@ -30,21 +31,21 @@ different VAD and media stacks for their deployment environments.
 
 - Removes long quiet regions while retaining short pauses, word boundaries, and configurable padding.
 - Uses Silero VAD by default on Android and iOS to retain speech; an explicit model-free RMS mode is also available.
-- Lets Android callers directly provide ranges to keep or remove on the original recording timeline.
-- Reports input, output, and removed durations plus kept/removed ranges; the VPS returns duration summaries in response headers.
+- Lets callers on all three platforms provide ranges to keep or remove on the original recording timeline.
+- Reports input, output, and removed durations plus kept/removed ranges; Linux can also return audio with a complete JSON manifest in a ZIP.
 - Streams decode and analysis instead of loading hours of PCM into memory at once.
-- Keeps mobile processing fully offline; the VPS option centralizes policy for multiple clients.
+- Keeps mobile processing fully offline; the Linux service centralizes policy for multiple clients.
 
 ## Three deployment scenarios
 
 | Scenario | Version and stack | Actual VAD | Reconstruction and output | Best fit |
 | --- | --- | --- | --- | --- |
-| **VPS / Linux CPU** | `0.1.0` · `Python 3.11+` · `FastAPI` · `FFmpeg` · `Docker` | `webrtcvad-wheels 2.0.14`; no ONNX model | Byte-range concatenation of original-rate/original-channel PCM S16LE; AAC/M4A or PCM/WAV | Web, desktop, shared multi-client processing, centralized thresholds, and smaller clients |
+| **Linux CPU service** | `0.2.0` · `Python 3.11+` · `FastAPI` · `FFmpeg` · `Docker` | `webrtcvad-wheels 2.0.14`; no ONNX model; manual ranges | Frame-accurate source-rate/source-channel PCM S16LE assembly with 8 ms fades; AAC/M4A, PCM/WAV, or audio + JSON ZIP | Web, desktop, shared multi-client processing, centralized thresholds, and smaller clients |
 | **Offline Android SDK** | `0.2.0` · `Kotlin/Java` · `MediaCodec` · `Media3` · `ONNX Runtime 1.28.0` | Silero VAD v6.2.1 by default; optional RMS; manual ranges | PCM frame removal with 8 ms boundary fades; AAC/M4A | Private on-device voice memo, interview, and meeting workflows |
 | **Offline iOS SDK** | `0.2.0` · `Swift/Objective-C` · `AVFoundation` · `ONNX Runtime 1.28.0` | The same Silero VAD v6.2.1 by default; optional RMS; manual ranges | `AVMutableComposition` range assembly and fades; AAC/M4A | Local iPhone/iPad processing with Swift or Objective-C integration |
 
-Use the Android or iOS SDK when recordings must stay on the device. Use the VPS for web/desktop,
-legacy clients, or a centralized server-side policy. Neither mobile SDK depends on the VPS.
+Use the Android or iOS SDK when recordings must stay on the device. Use the Linux service for
+web/desktop, legacy clients, or a centralized server-side policy. Neither mobile SDK depends on it.
 
 ## Actual architecture
 
@@ -52,14 +53,19 @@ legacy clients, or a centralized server-side policy. Neither mobile SDK depends 
 flowchart TB
     INPUT(["Input audio file"])
 
-    subgraph VPS["VPS / Linux CPU"]
+    subgraph LINUX["Linux CPU HTTP service"]
+        V0{"Manual ranges supplied?"}
+        VM["Validate, sort, merge, complement<br/>bypasses WebRTC VAD"]
         V1["FFmpeg analysis decode<br/>16 kHz mono PCM S16LE"]
         V2["WebRTC VAD<br/>10 / 20 / 30 ms binary decisions"]
-        V3["Python range planning<br/>long silence, short pauses, padding"]
+        V3["Python range planning<br/>long silence, voiced duration, padding"]
         V4["FFmpeg reconstruction decode<br/>original rate/channels PCM S16LE"]
-        V5["Python byte-copy concatenation<br/>no generative model or fades"]
+        V5["Python PCM-frame concatenation<br/>8 ms fades at real edit points"]
         V6["FFmpeg<br/>AAC/M4A or PCM/WAV"]
-        V1 --> V2 --> V3 --> V4 --> V5 --> V6
+        V7["Audio + complete range headers<br/>or ZIP + metadata.json"]
+        V0 -- "no" --> V1 --> V2 --> V3 --> V4
+        V0 -- "yes" --> VM --> V4
+        V4 --> V5 --> V6 --> V7
     end
 
     subgraph ANDROID["Offline Android SDK"]
@@ -99,7 +105,7 @@ flowchart TB
         IP --> IX
     end
 
-    INPUT --> V1
+    INPUT --> V0
     INPUT --> A0
     INPUT --> I0
 ```
@@ -118,7 +124,7 @@ and its binaries—not the model—vary by target architecture.
 | Android ABIs | `arm64-v8a`, `armeabi-v7a`, and `x86_64`; no 32-bit `x86`, legacy `armeabi`, or MIPS |
 | iOS runtime | `onnxruntime-objc:1.28.0`; its XCFramework has device `arm64` and simulator `arm64` + `x86_64` slices |
 | Runtime network use | None; dependencies and model enter the app at build time, and processing neither downloads a model nor uploads audio |
-| VPS | No Silero, ONNX, or ONNX Runtime; it always uses CPU WebRTC VAD |
+| Linux | No Silero, ONNX, or ONNX Runtime; automatic mode uses CPU WebRTC VAD and manual mode bypasses VAD |
 
 On mobile, entering the ORT inference path therefore means running Silero. ORT is not another VAD.
 Explicit `NON_SILENCE` mode runs only RMS energy detection and does not load the model, although ORT
@@ -134,7 +140,8 @@ binaries may still be present as build dependencies in the app.
 | iOS default request or any preset | Silero VAD; all three presets remain in `.speech` | yes / yes |
 | iOS explicit `.nonSilence` | Swift RMS energy detector, default threshold `-45 dB` | no / no |
 | iOS manual keep/remove ranges | Duration decode + `ManualRangePlanner` | no / no |
-| VPS HTTP endpoint | WebRTC VAD; there is no mobile-style mode selection | no / no |
+| Linux HTTP automatic mode | CPU WebRTC VAD Boolean decisions | no / no |
+| Linux HTTP manual keep/remove ranges | Original-timeline planner; bypasses WebRTC VAD | no / no |
 
 Here, “no / no” means the analysis does not load Silero or create an ORT inference session; it does
 not guarantee that ORT binaries are removed from the built app. Energy mode evaluates each 32 ms
@@ -154,7 +161,7 @@ wind may all be retained.
 - The default project page is Chinese, with this content-aligned English version.
 - VAD detects acoustic speech/sound activity. There is no Chinese/English language setting and no text output.
 - Chinese, English, and other spoken-language recordings can be supplied to the same APIs.
-- The repository includes a shared real-Mandarin Android/iOS regression fixture. Android has on-device results; iOS has a configured simulator regression. Equivalent on-device English, accent, and noise-set coverage is still missing, so production accuracy must be accepted on target-user audio.
+- The repository includes a shared real-Mandarin fixture used by all three platforms. Android has on-device evidence, while iOS and Linux have automated regressions. Equivalent on-device English, accent, and noise-set coverage is still missing, so production accuracy must be accepted on target-user audio.
 
 ## Default automatic trimming rules
 
@@ -183,9 +190,10 @@ Speech A ── keep 250 ms ── [remove middle long silence] ── keep 180 
 For example, a detected 1.5-second middle silence removes approximately
 `1500 - 250 - 180 = 1070 ms`. Exact boundaries still depend on 32 ms frame granularity and model output.
 
-The VPS has independent defaults: 20 ms frames, WebRTC aggressiveness 2, an 800 ms long-silence
-threshold, 250 ms total boundary silence, 80 ms padding, and 160 ms minimum speech. The 250 ms is
-split across both sides, so the default effective padding per side is `max(80, 250 / 2) = 125 ms`.
+Linux has independent defaults: 20 ms frames, WebRTC aggressiveness 2, an 800 ms long-silence
+threshold, 250 ms total boundary silence, 80 ms padding, 160 ms of actual voiced frames, and an
+8 ms edit fade. The 250 ms is split across both sides, so effective padding is
+`max(80, 250 / 2) = 125 ms` per side. No-speech input is kept by default or can return an error.
 
 ## Real Mandarin before/after demo
 
@@ -210,19 +218,19 @@ license, hashes, parameters, and ranges.
 
 | Platform | Audio output | Available metadata | Current difference |
 | --- | --- | --- | --- |
-| VPS | M4A or WAV binary HTTP response | `X-Original-Duration-Seconds`, `X-Output-Duration-Seconds`, and detected-speech-range count | The HTTP response does not currently expose the complete range list |
+| Linux | M4A/WAV or an audio + `metadata.json` ZIP | Input/output/removed durations, byte sizes, detector, `kept_ranges_ms`, `removed_ranges_ms`, parameters, and warnings | Use `response_mode=archive` for long range lists to avoid header limits |
 | Android | AAC/M4A `Uri` | `inputDurationMs`, `outputDurationMs`, `removedDurationMs`, `keptRanges`, `removedRanges`, and warnings | Automatic detection plus caller-supplied keep/remove ranges |
 | iOS | AAC/M4A file URL | `inputDurationMilliseconds`, `outputDurationMilliseconds`, `removedDurationMilliseconds`, `keptRanges`, `removedRanges`, and warnings | Automatic detection plus caller-supplied keep/remove ranges |
 
-All mobile ranges use the **original recording timeline**. They can drive waveform annotations, audit
-logs, a second editing pass, or either mobile SDK's caller-supplied manual ranges.
+All three platforms use the **original recording timeline**. Ranges can drive waveform annotations,
+audit logs, a second editing pass, or caller-supplied manual edits.
 
 ## Quick start
 
-### VPS / Docker
+### Linux / Docker
 
 ```bash
-cd vps
+cd linux
 cp .env.example .env
 docker compose up -d --build
 curl http://127.0.0.1:8080/healthz
@@ -236,7 +244,8 @@ curl -X POST http://127.0.0.1:8080/v1/audio/remove-long-silence \
   --output output.m4a
 ```
 
-See the [VPS documentation](vps/README.md) for resource limits, parameters, and reverse-proxy guidance.
+See the [Linux service documentation](linux/README_EN.md) for automatic rules, manual ranges,
+metadata, resource limits, and reverse-proxy guidance.
 
 ### Android / Kotlin
 
@@ -282,32 +291,33 @@ Xcode/CocoaPods setup.
 
 ```text
 vad_solution/
-├─ vps/                 FastAPI + WebRTC VAD + FFmpeg/Python PCM service
+├─ linux/               FastAPI + WebRTC VAD + FFmpeg/Python PCM service
 ├─ android/             Offline Kotlin/Java SDK, samples, tests, and device audio evidence
 ├─ ios/                 Offline Swift/Objective-C SDK, Xcode tests, and resources
 ├─ VadCutIOS.podspec    iOS CocoaPods specification
-└─ .github/workflows/   macOS iOS build and test workflow
+└─ .github/workflows/   Linux/Ubuntu and iOS/macOS build/test workflows
 ```
 
 ## Current validation status
 
 | Platform | Existing evidence | What it does not prove |
 | --- | --- | --- |
-| VPS | Range-planning unit tests pass `2/2` in a correct Python 3.11 dependency environment; Docker, health, authentication, and processing endpoints are implemented | No repository-wide automated HTTP/real-audio CI, task queue, or object-storage production acceptance yet |
+| Linux | Local Windows/Python 3.11/FFmpeg 8.1 tests pass `21/21` across units, health, HTTP, manual ranges, no-speech policies, ZIP metadata, documentation consistency, and a real Mandarin MP3; Ubuntu CI and a container build are configured | Docker is unavailable on this workstation, so the new container workflow still needs its first pushed Actions run; this is not queue, object-storage, load, or production acceptance |
 | Android | OPPO PEGM10 / Android 13 / `arm64-v8a`: real Mandarin MP3, real WAV, same-codec size baseline, manual keep/remove E2E `4/4`; unit tests, release AAR, lint, and 16 KB ELF/APK alignment pass | `armeabi-v7a` and `x86_64` currently have packaging/build evidence, not corresponding hardware-device evidence; multi-vendor and long-recording stress matrices remain |
-| iOS | The `0.2.0` source configures Xcode simulator tests for automatic Silero, RMS, manual keep/remove, real Mandarin MP3, Objective-C compilation, and pod lint | This change still needs an actual macOS CI pass and cannot replace real-iPhone power, thermal, background execution, and device codec compatibility testing |
+| iOS | macOS CI passes `17/17` Xcode Simulator tests for automatic Silero, RMS, manual keep/remove, real Mandarin MP3, Objective-C, and pod lint | It cannot replace real-iPhone power, thermal, background execution, and device codec compatibility testing |
 
 ## Important boundaries
 
 - All three implementations currently process **existing audio files**; they do not provide microphone recording or real-time streaming VAD.
-- Android/iOS re-encode to AAC/M4A, and VPS M4A is also re-encoded; this is not lossless packet copying.
+- Android/iOS re-encode to AAC/M4A, and Linux M4A is also re-encoded; this is not lossless packet copying.
 - RMS mode only detects energy. Music, keyboard noise, and wind may be retained; use default Silero mode when the goal is speech only.
-- The VPS API is synchronous, with defaults of 200 MB maximum upload, 3,600 seconds maximum duration, and 2 concurrent jobs.
+- The Linux API is synchronous, with defaults of 200 MB maximum upload, 3,600 seconds maximum duration, and 2 concurrent jobs.
 - No automatic configuration fits every accent, distance, noise profile, and microphone. Measure false removals and missed removals on target production audio.
 
 ## Detailed documentation
 
-- [VPS CPU service](vps/README.md)
+- [Linux CPU service](linux/README_EN.md)
+- [Linux CPU 服务](linux/README.md)
 - [Offline Android SDK](android/README.md)
 - [Offline iOS SDK](ios/README.md)
 - [中文项目说明](README.md)
@@ -319,4 +329,4 @@ ONNX Runtime, Media3, and the FLEURS test material. See the
 [Android license](android/LICENSE), [Android third-party notices](android/THIRD_PARTY_NOTICES.md),
 [iOS license](ios/LICENSE), and [iOS third-party notices](ios/THIRD_PARTY_NOTICES.md).
 There is currently no single root-level `LICENSE` covering every directory, so do not infer that the
-mobile SDK licenses automatically apply to the VPS directory.
+mobile SDK licenses automatically apply to the Linux directory.
