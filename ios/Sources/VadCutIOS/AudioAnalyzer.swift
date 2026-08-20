@@ -14,6 +14,22 @@ final class AudioAnalyzer {
         config: TrimConfig,
         onProgress: (Int64, Int64) -> Void
     ) async throws -> AnalysisResult {
+        return try await decode(inputURL: inputURL, config: config, onProgress: onProgress)
+    }
+
+    /// Decodes the stream to obtain an exact duration without loading an activity detector.
+    func analyzeDuration(
+        inputURL: URL,
+        onProgress: (Int64, Int64) -> Void
+    ) async throws -> AnalysisResult {
+        return try await decode(inputURL: inputURL, config: nil, onProgress: onProgress)
+    }
+
+    private func decode(
+        inputURL: URL,
+        config: TrimConfig?,
+        onProgress: (Int64, Int64) -> Void
+    ) async throws -> AnalysisResult {
         let asset = AVURLAsset(url: inputURL)
         let durationTime: CMTime
         let audioTracks: [AVAssetTrack]
@@ -34,17 +50,26 @@ final class AudioAnalyzer {
         let declaredDuration = durationTime.isNumeric && durationTime.seconds.isFinite && durationTime.seconds > 0
             ? Int64(durationTime.seconds * 1_000_000)
             : 0
-        let detector: ActivityDetector
-        switch config.mode {
-        case .speech:
-            detector = try SileroVadEngine(verifyIntegrity: config.verifyModelIntegrity)
-        case .nonSilence:
-            detector = EnergyActivityDetector(thresholdDecibels: config.energyThresholdDecibels)
+        let detector: ActivityDetector?
+        if let config {
+            switch config.mode {
+            case .speech:
+                detector = try SileroVadEngine(verifyIntegrity: config.verifyModelIntegrity)
+            case .nonSilence:
+                detector = EnergyActivityDetector(thresholdDecibels: config.energyThresholdDecibels)
+            }
+        } else {
+            detector = nil
         }
-        let collector = VadFrameCollector(
-            detector: detector,
-            planner: ActivitySegmentPlanner(config: config)
-        )
+        let collector: VadFrameCollector?
+        if let detector, let config {
+            collector = VadFrameCollector(
+                detector: detector,
+                planner: ActivitySegmentPlanner(config: config)
+            )
+        } else {
+            collector = nil
+        }
 
         let reader: AVAssetReader
         do {
@@ -77,6 +102,7 @@ final class AudioAnalyzer {
 
         var lastProgressTime = Date.distantPast
         var validatedFormat = false
+        var decodedOutputSamples: Int64 = 0
         do {
             while let sampleBuffer = output.copyNextSampleBuffer() {
                 try Task.checkCancellation()
@@ -91,20 +117,24 @@ final class AudioAnalyzer {
                 guard byteCount % MemoryLayout<Float>.stride == 0 else {
                     throw TrimError(code: .unsupportedAudioFormat, message: "Decoder returned unaligned Float32 PCM")
                 }
-                var samples = Array(repeating: Float(0), count: byteCount / MemoryLayout<Float>.stride)
-                let copyStatus = samples.withUnsafeMutableBytes { bytes in
-                    CMBlockBufferCopyDataBytes(
-                        dataBuffer,
-                        atOffset: 0,
-                        dataLength: byteCount,
-                        destination: bytes.baseAddress!
-                    )
-                }
-                guard copyStatus == kCMBlockBufferNoErr else {
-                    throw TrimError(code: .analysisFailed, message: "Unable to copy decoded PCM data")
-                }
-                for sample in samples {
-                    try collector.accept(sample)
+                let sampleCount = byteCount / MemoryLayout<Float>.stride
+                decodedOutputSamples += Int64(sampleCount)
+                if let collector {
+                    var samples = Array(repeating: Float(0), count: sampleCount)
+                    let copyStatus = samples.withUnsafeMutableBytes { bytes in
+                        CMBlockBufferCopyDataBytes(
+                            dataBuffer,
+                            atOffset: 0,
+                            dataLength: byteCount,
+                            destination: bytes.baseAddress!
+                        )
+                    }
+                    guard copyStatus == kCMBlockBufferNoErr else {
+                        throw TrimError(code: .analysisFailed, message: "Unable to copy decoded PCM data")
+                    }
+                    for sample in samples {
+                        try collector.accept(sample)
+                    }
                 }
 
                 let now = Date()
@@ -113,7 +143,7 @@ final class AudioAnalyzer {
                     let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                     let processed = timestamp.isNumeric && timestamp.seconds.isFinite
                         ? max(0, Int64(timestamp.seconds * 1_000_000))
-                        : collector.outputDuration
+                        : decodedOutputSamples * 1_000_000 / Int64(VadFrameCollector.sampleRate)
                     onProgress(processed, declaredDuration)
                 }
             }
@@ -140,15 +170,18 @@ final class AudioAnalyzer {
                 underlying: reader.error
             )
         }
-        guard validatedFormat, collector.totalOutputSamples > 0 else {
+        guard validatedFormat, decodedOutputSamples > 0 else {
             throw TrimError(code: .unsupportedAudioFormat, message: "The decoder produced no PCM audio")
         }
 
-        let duration = max(1, max(declaredDuration, collector.outputDuration))
+        // The decoded PCM sample count is the editing timeline used by both automatic and manual
+        // modes. Container metadata remains useful for progress, but may include encoder padding.
+        let decodedDuration = decodedOutputSamples * 1_000_000 / Int64(VadFrameCollector.sampleRate)
+        let duration = max(1, decodedDuration)
         onProgress(duration, declaredDuration)
         return AnalysisResult(
             duration: duration,
-            keptRanges: try collector.finish(duration: duration),
+            keptRanges: try collector?.finish(duration: duration) ?? [],
             durationWasKnown: declaredDuration > 0
         )
     }

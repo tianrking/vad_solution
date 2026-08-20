@@ -41,7 +41,7 @@ different VAD and media stacks for their deployment environments.
 | --- | --- | --- | --- | --- |
 | **VPS / Linux CPU** | `0.1.0` · `Python 3.11+` · `FastAPI` · `FFmpeg` · `Docker` | `webrtcvad-wheels 2.0.14`; no ONNX model | Byte-range concatenation of original-rate/original-channel PCM S16LE; AAC/M4A or PCM/WAV | Web, desktop, shared multi-client processing, centralized thresholds, and smaller clients |
 | **Offline Android SDK** | `0.2.0` · `Kotlin/Java` · `MediaCodec` · `Media3` · `ONNX Runtime 1.28.0` | Silero VAD v6.2.1 by default; optional RMS; manual ranges | PCM frame removal with 8 ms boundary fades; AAC/M4A | Private on-device voice memo, interview, and meeting workflows |
-| **Offline iOS SDK** | `0.1.0` · `Swift/Objective-C` · `AVFoundation` · `ONNX Runtime 1.28.0` | The same Silero VAD v6.2.1 by default; optional RMS | `AVMutableComposition` range assembly and fades; AAC/M4A | Local iPhone/iPad processing with Swift or Objective-C integration |
+| **Offline iOS SDK** | `0.2.0` · `Swift/Objective-C` · `AVFoundation` · `ONNX Runtime 1.28.0` | The same Silero VAD v6.2.1 by default; optional RMS; manual ranges | `AVMutableComposition` range assembly and fades; AAC/M4A | Local iPhone/iPad processing with Swift or Objective-C integration |
 
 Use the Android or iOS SDK when recordings must stay on the device. Use the VPS for web/desktop,
 legacy clients, or a centralized server-side policy. Neither mobile SDK depends on the VPS.
@@ -83,13 +83,17 @@ flowchart TB
 
     subgraph IOS["Offline iOS SDK"]
         I0["TrimRequest<br/>defaults to voiceMemo + speech"]
-        I1["AVAssetReader streaming decode<br/>16 kHz mono Float32 / 32 ms"]
+        I1{"manualTrimPlan supplied?"}
+        IM["AVAssetReader duration decode + ManualRangePlanner<br/>bypasses Silero and RMS"]
+        ID["AVAssetReader streaming decode<br/>16 kHz mono Float32 / 32 ms"]
         I2{"Detection mode"}
         IS["speech: default<br/>same Silero ONNX + ORT Objective-C"]
         IE["nonSilence: explicit<br/>Swift RMS energy, no model"]
         IP["ActivitySegmentPlanner<br/>kept/removed ranges"]
         IX["AVMutableComposition + AVAudioMix<br/>assemble, fade, AAC/M4A"]
-        I0 --> I1 --> I2
+        I0 --> I1
+        I1 -- "yes" --> IM --> IX
+        I1 -- "no" --> ID --> I2
         I2 -- "speech" --> IS --> IP
         I2 -- "nonSilence" --> IE --> IP
         IP --> IX
@@ -112,7 +116,7 @@ and its binaries—not the model—vary by target architecture.
 | Model identity | Both mobile resources have SHA-256 `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3` |
 | Android runtime | `onnxruntime-android:1.28.0`: Java API → JNI → native libraries for the device ABI |
 | Android ABIs | `arm64-v8a`, `armeabi-v7a`, and `x86_64`; no 32-bit `x86`, legacy `armeabi`, or MIPS |
-| iOS runtime | `onnxruntime-objc:1.28.0` CocoaPod; Swift uses the Objective-C API linked for the current Apple target |
+| iOS runtime | `onnxruntime-objc:1.28.0`; its XCFramework has device `arm64` and simulator `arm64` + `x86_64` slices |
 | Runtime network use | None; dependencies and model enter the app at build time, and processing neither downloads a model nor uploads audio |
 | VPS | No Silero, ONNX, or ONNX Runtime; it always uses CPU WebRTC VAD |
 
@@ -129,6 +133,7 @@ binaries may still be present as build dependencies in the app.
 | Android manual keep/remove ranges | Duration probe + `ManualRangePlanner` | no / no |
 | iOS default request or any preset | Silero VAD; all three presets remain in `.speech` | yes / yes |
 | iOS explicit `.nonSilence` | Swift RMS energy detector, default threshold `-45 dB` | no / no |
+| iOS manual keep/remove ranges | Duration decode + `ManualRangePlanner` | no / no |
 | VPS HTTP endpoint | WebRTC VAD; there is no mobile-style mode selection | no / no |
 
 Here, “no / no” means the analysis does not load Silero or create an ORT inference session; it does
@@ -149,7 +154,7 @@ wind may all be retained.
 - The default project page is Chinese, with this content-aligned English version.
 - VAD detects acoustic speech/sound activity. There is no Chinese/English language setting and no text output.
 - Chinese, English, and other spoken-language recordings can be supplied to the same APIs.
-- The repository includes an on-device real-Mandarin Android regression fixture. It does not yet include equivalent on-device English, accent, and noise-set coverage; production accuracy must be accepted on target-user audio.
+- The repository includes a shared real-Mandarin Android/iOS regression fixture. Android has on-device results; iOS has a configured simulator regression. Equivalent on-device English, accent, and noise-set coverage is still missing, so production accuracy must be accepted on target-user audio.
 
 ## Default automatic trimming rules
 
@@ -207,10 +212,10 @@ license, hashes, parameters, and ranges.
 | --- | --- | --- | --- |
 | VPS | M4A or WAV binary HTTP response | `X-Original-Duration-Seconds`, `X-Output-Duration-Seconds`, and detected-speech-range count | The HTTP response does not currently expose the complete range list |
 | Android | AAC/M4A `Uri` | `inputDurationMs`, `outputDurationMs`, `removedDurationMs`, `keptRanges`, `removedRanges`, and warnings | Automatic detection plus caller-supplied keep/remove ranges |
-| iOS | AAC/M4A file URL | `inputDurationMilliseconds`, `outputDurationMilliseconds`, `removedDurationMilliseconds`, `keptRanges`, `removedRanges`, and warnings | Automatic speech/nonSilence only; no manual-range API yet |
+| iOS | AAC/M4A file URL | `inputDurationMilliseconds`, `outputDurationMilliseconds`, `removedDurationMilliseconds`, `keptRanges`, `removedRanges`, and warnings | Automatic detection plus caller-supplied keep/remove ranges |
 
 All mobile ranges use the **original recording timeline**. They can drive waveform annotations, audit
-logs, a second editing pass, or Android's caller-supplied manual ranges.
+logs, a second editing pass, or either mobile SDK's caller-supplied manual ranges.
 
 ## Quick start
 
@@ -266,6 +271,10 @@ print(result.removedDurationMilliseconds)
 print(result.removedRanges)
 ```
 
+Supply `manualTrimPlan: .removeRanges(...)` or `.keepRanges(...)` to edit the original timeline
+directly and bypass both Silero and energy detection. The iOS guide includes complete Swift and
+Objective-C examples.
+
 See the [iOS SDK documentation](ios/README.md) for the Objective-C bridge, cancellation, and
 Xcode/CocoaPods setup.
 
@@ -286,7 +295,7 @@ vad_solution/
 | --- | --- | --- |
 | VPS | Range-planning unit tests pass `2/2` in a correct Python 3.11 dependency environment; Docker, health, authentication, and processing endpoints are implemented | No repository-wide automated HTTP/real-audio CI, task queue, or object-storage production acceptance yet |
 | Android | OPPO PEGM10 / Android 13 / `arm64-v8a`: real Mandarin MP3, real WAV, same-codec size baseline, manual keep/remove E2E `4/4`; unit tests, release AAR, lint, and 16 KB ELF/APK alignment pass | `armeabi-v7a` and `x86_64` currently have packaging/build evidence, not corresponding hardware-device evidence; multi-vendor and long-recording stress matrices remain |
-| iOS | macOS GitHub Actions is configured for Xcode simulator builds, Silero inference, M4A end-to-end tests, and pod lint | This cannot replace real-iPhone power, thermal, background execution, and device codec compatibility testing |
+| iOS | The `0.2.0` source configures Xcode simulator tests for automatic Silero, RMS, manual keep/remove, real Mandarin MP3, Objective-C compilation, and pod lint | This change still needs an actual macOS CI pass and cannot replace real-iPhone power, thermal, background execution, and device codec compatibility testing |
 
 ## Important boundaries
 

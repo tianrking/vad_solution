@@ -28,6 +28,14 @@ public enum TrimWarning: String, Sendable {
     case noActivityDetectedKeptOriginal
 }
 
+public enum ManualTrimMode: String, Sendable {
+    /// Delete the supplied ranges and keep their complement.
+    case removeRanges
+
+    /// Keep only the supplied ranges and delete their complement.
+    case keepRanges
+}
+
 public struct AudioRange: Equatable, Sendable {
     public let startMilliseconds: Int64
     public let endMilliseconds: Int64
@@ -39,6 +47,29 @@ public struct AudioRange: Equatable, Sendable {
 
     public var durationMilliseconds: Int64 {
         max(0, endMilliseconds - startMilliseconds)
+    }
+}
+
+/// A manual edit plan whose half-open ranges use the original input timeline in milliseconds.
+///
+/// Ranges may be supplied in any order and may overlap or touch. VadCut validates, sorts, and
+/// merges them after decoding the exact input duration. Detector parameters are ignored while a
+/// manual plan is present; `TrimConfig.fadeDurationMilliseconds` still applies during export.
+public struct ManualTrimPlan: Sendable {
+    public let mode: ManualTrimMode
+    public let ranges: [AudioRange]
+
+    public init(mode: ManualTrimMode, ranges: [AudioRange]) {
+        self.mode = mode
+        self.ranges = ranges
+    }
+
+    public static func removeRanges(_ ranges: [AudioRange]) -> ManualTrimPlan {
+        return ManualTrimPlan(mode: .removeRanges, ranges: ranges)
+    }
+
+    public static func keepRanges(_ ranges: [AudioRange]) -> ManualTrimPlan {
+        return ManualTrimPlan(mode: .keepRanges, ranges: ranges)
     }
 }
 
@@ -126,11 +157,25 @@ public struct TrimRequest: Sendable {
     public let inputURL: URL
     public let outputURL: URL
     public let config: TrimConfig
+    public let manualTrimPlan: ManualTrimPlan?
 
     public init(inputURL: URL, outputURL: URL, config: TrimConfig = .preset(.voiceMemo)) {
         self.inputURL = inputURL
         self.outputURL = outputURL
         self.config = config
+        self.manualTrimPlan = nil
+    }
+
+    public init(
+        inputURL: URL,
+        outputURL: URL,
+        config: TrimConfig = .preset(.voiceMemo),
+        manualTrimPlan: ManualTrimPlan
+    ) {
+        self.inputURL = inputURL
+        self.outputURL = outputURL
+        self.config = config
+        self.manualTrimPlan = manualTrimPlan
     }
 }
 
@@ -146,6 +191,7 @@ public struct TrimResult: Sendable {
 
 public enum TrimErrorCode: String, Sendable {
     case invalidRequest
+    case invalidTimeRanges
     case inputOpenFailed
     case noAudioTrack
     case unsupportedAudioFormat
@@ -156,9 +202,31 @@ public enum TrimErrorCode: String, Sendable {
     case exportFailed
     case outputWriteFailed
     case cancelled
+
+    /// Stable numeric value used by the Objective-C `NSError.code` bridge.
+    public var numericValue: Int {
+        switch self {
+        case .invalidRequest: return 1
+        case .invalidTimeRanges: return 2
+        case .inputOpenFailed: return 3
+        case .noAudioTrack: return 4
+        case .unsupportedAudioFormat: return 5
+        case .modelLoadFailed: return 6
+        case .modelIntegrityFailed: return 7
+        case .analysisFailed: return 8
+        case .noSpeechDetected: return 9
+        case .exportFailed: return 10
+        case .outputWriteFailed: return 11
+        case .cancelled: return 12
+        }
+    }
 }
 
-public struct TrimError: LocalizedError, Sendable {
+public struct TrimError: LocalizedError, CustomNSError, Sendable {
+    public static let errorDomain = "com.vadcut.ios"
+    public static let codeUserInfoKey = "VadCutErrorCode"
+    public static let underlyingDescriptionUserInfoKey = "VadCutUnderlyingErrorDescription"
+
     public let code: TrimErrorCode
     public let message: String
     public let underlyingDescription: String?
@@ -170,4 +238,15 @@ public struct TrimError: LocalizedError, Sendable {
     }
 
     public var errorDescription: String? { message }
+    public var errorCode: Int { code.numericValue }
+    public var errorUserInfo: [String: Any] {
+        var values: [String: Any] = [
+            NSLocalizedDescriptionKey: message,
+            Self.codeUserInfoKey: code.rawValue,
+        ]
+        if let underlyingDescription {
+            values[Self.underlyingDescriptionUserInfoKey] = underlyingDescription
+        }
+        return values
+    }
 }

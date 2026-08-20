@@ -39,7 +39,7 @@ VadCut 把“输入录音 → 找出语音/非静音区间 → 删除长静音 �
 | --- | --- | --- | --- | --- |
 | **VPS / Linux CPU** | `0.1.0` · `Python 3.11+` · `FastAPI` · `FFmpeg` · `Docker` | `webrtcvad-wheels 2.0.14`，无 ONNX 模型 | 原采样率/原声道 PCM S16LE 按字节硬拼接；AAC/M4A 或 PCM/WAV | Web、桌面、多端统一处理；统一阈值；不想把模型放进客户端 |
 | **Android 离线 SDK** | `0.2.0` · `Kotlin/Java` · `MediaCodec` · `Media3` · `ONNX Runtime 1.28.0` | 默认 Silero VAD v6.2.1；可选 RMS 能量；可手动区间 | PCM 帧裁剪与 8 ms 边界淡化；AAC/M4A | 语音备忘录、会议、采访等隐私优先、无需上传的 Android App |
-| **iOS 离线 SDK** | `0.1.0` · `Swift/Objective-C` · `AVFoundation` · `ONNX Runtime 1.28.0` | 默认同一 Silero VAD v6.2.1；可选 RMS 能量 | `AVMutableComposition` 区间拼接与淡化；AAC/M4A | 需要本地处理、Swift/Objective-C 接入的 iPhone/iPad App |
+| **iOS 离线 SDK** | `0.2.0` · `Swift/Objective-C` · `AVFoundation` · `ONNX Runtime 1.28.0` | 默认同一 Silero VAD v6.2.1；可选 RMS 能量；可手动区间 | `AVMutableComposition` 区间拼接与淡化；AAC/M4A | 需要本地处理、Swift/Objective-C 接入的 iPhone/iPad App |
 
 选择建议很简单：移动端要求录音不出设备时，分别使用 Android/iOS SDK；Web、桌面、
 旧客户端或需要统一服务端策略时，使用 VPS。Android 和 iOS SDK 都不依赖 VPS。
@@ -81,13 +81,17 @@ flowchart TB
 
     subgraph IOS["iOS 离线 SDK"]
         I0["TrimRequest<br/>默认 voiceMemo + speech"]
-        I1["AVAssetReader 流式解码<br/>16 kHz mono Float32 / 32 ms"]
+        I1{"传入 manualTrimPlan？"}
+        IM["AVAssetReader 时长解码 + ManualRangePlanner<br/>绕过 Silero 和 RMS"]
+        ID["AVAssetReader 流式解码<br/>16 kHz mono Float32 / 32 ms"]
         I2{"检测模式"}
         IS["speech：默认<br/>同一 Silero ONNX + ORT Objective-C"]
         IE["nonSilence：显式选择<br/>Swift RMS 能量，无模型"]
         IP["ActivitySegmentPlanner<br/>保留/删除区间"]
         IX["AVMutableComposition + AVAudioMix<br/>拼接、淡化、AAC/M4A"]
-        I0 --> I1 --> I2
+        I0 --> I1
+        I1 -- "是" --> IM --> IX
+        I1 -- "否" --> ID --> I2
         I2 -- "speech" --> IS --> IP
         I2 -- "nonSilence" --> IE --> IP
         IP --> IX
@@ -109,7 +113,7 @@ flowchart TB
 | 模型一致性 | Android/iOS 两份资源 SHA-256 均为 `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3` |
 | Android 运行时 | `onnxruntime-android:1.28.0`：Java API → JNI → 设备 ABI 的原生 `.so` |
 | Android ABI | `arm64-v8a`、`armeabi-v7a`、`x86_64`；不包含 32 位 `x86`、旧 `armeabi` 或 MIPS |
-| iOS 运行时 | `onnxruntime-objc:1.28.0` CocoaPod；Swift 调用 Objective-C API 并链接当前 Apple target |
+| iOS 运行时 | `onnxruntime-objc:1.28.0` CocoaPod；XCFramework 为真机 `arm64`、模拟器 `arm64` + `x86_64` |
 | 运行时联网 | 不需要；依赖和模型在构建时进入 App，处理录音时不会下载模型或上传音频 |
 | VPS | 不使用 Silero、ONNX 或 ONNX Runtime；固定使用 CPU WebRTC VAD |
 
@@ -125,6 +129,7 @@ flowchart TB
 | Android 手动保留/删除区间 | 时长探测 + `ManualRangePlanner` | 否 / 否 |
 | iOS 默认请求或三个预设 | Silero VAD；三个预设都保持 `.speech` | 是 / 是 |
 | iOS 显式 `.nonSilence` | Swift RMS 能量检测，默认阈值 `-45 dB` | 否 / 否 |
+| iOS 手动保留/删除区间 | 时长解码 + `ManualRangePlanner` | 否 / 否 |
 | VPS HTTP 接口 | WebRTC VAD；没有移动端模式选择 | 否 / 否 |
 
 这里的“否 / 否”只表示本次分析不会加载 Silero 或创建 ORT 推理会话，不代表构建产物
@@ -142,7 +147,7 @@ dB >= energyThresholdDb（默认 -45 dB）→ 活动帧，否则静音帧
 
 - 项目首页默认使用中文，并提供内容对齐的 [English README](README_EN.md)。
 - VAD 检测的是声学上的“有人声/有声音”，接口没有中文或英文语言参数，也不会输出文字。
-- 中文、英文及其他语言的录音都可作为输入；当前仓库已经提交 Android 真人普通话真机回归样本。
+- 中文、英文及其他语言的录音都可作为输入；当前仓库已提交 Android/iOS 共用的真人普通话回归样本，Android 已有真机结果，iOS 已配置模拟器回归测试。
 - 当前尚未提交同等级的英文、多口音和多噪声真机回归集，正式产品仍应使用目标用户语料验收误删率和漏删率。
 
 ## 默认自动裁剪规则
@@ -197,10 +202,10 @@ Android SDK 默认 Silero 模式后导出，不是电脑按固定时间点预制
 | --- | --- | --- | --- |
 | VPS | M4A 或 WAV 二进制响应 | `X-Original-Duration-Seconds`、`X-Output-Duration-Seconds`、检测到的语音区间数量 | 当前 HTTP 响应不返回完整区间列表 |
 | Android | AAC/M4A `Uri` | `inputDurationMs`、`outputDurationMs`、`removedDurationMs`、`keptRanges`、`removedRanges`、warnings | 支持自动检测、手动保留区间和手动删除区间 |
-| iOS | AAC/M4A 文件 URL | `inputDurationMilliseconds`、`outputDurationMilliseconds`、`removedDurationMilliseconds`、`keptRanges`、`removedRanges`、warnings | 当前只支持自动 speech/nonSilence，没有手动区间 API |
+| iOS | AAC/M4A 文件 URL | `inputDurationMilliseconds`、`outputDurationMilliseconds`、`removedDurationMilliseconds`、`keptRanges`、`removedRanges`、warnings | 支持自动检测、手动保留区间和手动删除区间 |
 
 所有移动端区间都使用**原始录音时间轴**，可用于波形标记、审计日志、二次编辑或把用户
-选择的切点再次传给 Android 手动模式。
+选择的切点再次传给 Android 或 iOS 手动模式。
 
 ## 快速开始
 
@@ -256,6 +261,9 @@ print(result.removedDurationMilliseconds)
 print(result.removedRanges)
 ```
 
+传入 `manualTrimPlan: .removeRanges(...)` 或 `.keepRanges(...)` 可直接按原始时间轴裁剪，
+并绕过 Silero/能量检测。Swift 与 Objective-C 完整示例见 iOS 文档。
+
 Objective-C bridge、取消和 Xcode/CocoaPods 构建方式见 [iOS SDK 文档](ios/README.md)。
 
 ## 仓库结构
@@ -275,7 +283,7 @@ vad_solution/
 | --- | --- | --- |
 | VPS | Python 3.11 正确依赖环境下区间规划单测 `2/2` 通过；包含 Docker、健康检查、认证和真实处理接口 | 尚无仓库级自动化 HTTP/真实音频 CI、队列或对象存储生产验收 |
 | Android | OPPO PEGM10 / Android 13 / `arm64-v8a` 真人中文 MP3、真实 WAV、同编码体积对照、手动保留/删除全链路 `4/4`；单测、Release AAR、Lint、16 KB ELF/APK 对齐通过 | `armeabi-v7a` 和 `x86_64` 目前是打包/构建证据，不是对应硬件真机证据；尚缺多厂商和长录音压力矩阵 |
-| iOS | macOS GitHub Actions 配置了 Xcode 模拟器编译、Silero 推理、M4A 端到端测试和 pod lint | 不能替代真实 iPhone 的功耗、温度、后台执行和设备编解码兼容性验证 |
+| iOS | `0.2.0` 源码已配置 Xcode 模拟器的自动 Silero、RMS、手动保留/删除、真人中文 MP3、Objective-C 编译和 pod lint 测试 | 本次改动仍需 macOS CI 实际通过；也不能替代真实 iPhone 的功耗、温度、后台执行和设备编解码兼容性验证 |
 
 ## 重要边界
 

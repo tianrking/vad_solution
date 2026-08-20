@@ -52,13 +52,16 @@ final class TrimCoordinator {
         request: TrimRequest,
         onProgress: @escaping (TrimProgress) -> Void
     ) async throws -> TrimResult {
-        try validate(request)
+        try validateRequestShape(request)
 
         let inputAccess = request.inputURL.startAccessingSecurityScopedResource()
         let outputAccess = request.outputURL.startAccessingSecurityScopedResource()
         defer {
             if inputAccess { request.inputURL.stopAccessingSecurityScopedResource() }
             if outputAccess { request.outputURL.stopAccessingSecurityScopedResource() }
+        }
+        guard FileManager.default.fileExists(atPath: request.inputURL.path) else {
+            throw TrimError(code: .inputOpenFailed, message: "The input file does not exist or is inaccessible")
         }
 
         emit(onProgress, TrimProgress(
@@ -67,10 +70,7 @@ final class TrimCoordinator {
             processedDurationMilliseconds: 0,
             totalDurationMilliseconds: 0
         ))
-        let analysis = try await analyzer.analyze(
-            inputURL: request.inputURL,
-            config: request.config
-        ) { processed, total in
+        let analysisProgress: (Int64, Int64) -> Void = { processed, total in
             let percentage = total > 0 ? Int(min(total, processed) * 60 / total) : 0
             self.emit(onProgress, TrimProgress(
                 phase: .analyzing,
@@ -79,12 +79,30 @@ final class TrimCoordinator {
                 totalDurationMilliseconds: total / 1_000
             ))
         }
+        let analysis: AnalysisResult
+        if request.manualTrimPlan == nil {
+            analysis = try await analyzer.analyze(
+                inputURL: request.inputURL,
+                config: request.config,
+                onProgress: analysisProgress
+            )
+        } else {
+            analysis = try await analyzer.analyzeDuration(
+                inputURL: request.inputURL,
+                onProgress: analysisProgress
+            )
+        }
         try Task.checkCancellation()
 
         var warnings: [TrimWarning] = []
         if !analysis.durationWasKnown { warnings.append(.inputDurationUnknown) }
         let keptRanges: [TimeRangeUs]
-        if analysis.keptRanges.isEmpty {
+        if let manualTrimPlan = request.manualTrimPlan {
+            keptRanges = try ManualRangePlanner.resolveKeptRanges(
+                plan: manualTrimPlan,
+                durationMicroseconds: analysis.duration
+            )
+        } else if analysis.keptRanges.isEmpty {
             switch request.config.noSpeechPolicy {
             case .fail:
                 throw TrimError(code: .noSpeechDetected, message: "No requested audio activity was detected")
@@ -157,17 +175,17 @@ final class TrimCoordinator {
         return result
     }
 
-    private func validate(_ request: TrimRequest) throws {
+    private func validateRequestShape(_ request: TrimRequest) throws {
         guard request.inputURL.isFileURL, request.outputURL.isFileURL else {
             throw TrimError(code: .invalidRequest, message: "Input and output must be file URLs")
         }
         guard request.inputURL.standardizedFileURL != request.outputURL.standardizedFileURL else {
             throw TrimError(code: .invalidRequest, message: "In-place overwrite is not supported")
         }
-        guard FileManager.default.fileExists(atPath: request.inputURL.path) else {
-            throw TrimError(code: .inputOpenFailed, message: "The input file does not exist")
-        }
         try validateConfig(request.config)
+        if let manualTrimPlan = request.manualTrimPlan {
+            try ManualRangePlanner.validateBasics(plan: manualTrimPlan)
+        }
     }
 
     private func commitOutput(temporaryURL: URL, outputURL: URL) throws {

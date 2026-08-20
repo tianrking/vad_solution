@@ -54,6 +54,51 @@ final class CoreTests: XCTestCase {
         assertApproximatelyEqual(output.count, 16_000, accuracy: 1)
         XCTAssertTrue(output.allSatisfy { $0.isFinite && $0 >= -1 && $0 <= 1 })
     }
+
+    func testTrimErrorBridgesStableNSErrorDomainCodeAndStringCode() {
+        let error = TrimError(code: .invalidTimeRanges, message: "Invalid manual range") as NSError
+
+        XCTAssertEqual(error.domain, TrimError.errorDomain)
+        XCTAssertEqual(error.code, VDTrimErrorCode.invalidTimeRanges.rawValue)
+        XCTAssertEqual(
+            error.userInfo[TrimError.codeUserInfoKey] as? String,
+            TrimErrorCode.invalidTimeRanges.rawValue
+        )
+        XCTAssertEqual(error.localizedDescription, "Invalid manual range")
+    }
+
+    func testSwiftAndObjectiveCErrorCodesStayAligned() {
+        let swiftCodes: [TrimErrorCode] = [
+            .invalidRequest,
+            .invalidTimeRanges,
+            .inputOpenFailed,
+            .noAudioTrack,
+            .unsupportedAudioFormat,
+            .modelLoadFailed,
+            .modelIntegrityFailed,
+            .analysisFailed,
+            .noSpeechDetected,
+            .exportFailed,
+            .outputWriteFailed,
+            .cancelled,
+        ]
+        let objectiveCCodes: [VDTrimErrorCode] = [
+            .invalidRequest,
+            .invalidTimeRanges,
+            .inputOpenFailed,
+            .noAudioTrack,
+            .unsupportedAudioFormat,
+            .modelLoadFailed,
+            .modelIntegrityFailed,
+            .analysisFailed,
+            .noSpeechDetected,
+            .exportFailed,
+            .outputWriteFailed,
+            .cancelled,
+        ]
+
+        XCTAssertEqual(swiftCodes.map(\.numericValue), objectiveCCodes.map(\.rawValue))
+    }
 }
 
 private extension XCTestCase {
