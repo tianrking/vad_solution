@@ -10,8 +10,9 @@
 - `NON_SILENCE`：使用 RMS 能量检测，保留人声、音乐和其他非静音声音。
 - 手动区间：调用方可传入原录音时间轴上的“删除区间”或“保留区间”，SDK 校验、排序、合并后导出。
 - 长音频采用两遍流式处理。PCM 缓冲区大小固定，不把整段录音载入内存；区间元数据随剪切点数量增长。
-- 输出固定为 AAC 音轨的 M4A 文件；有视频轨的输入会只导出音频。
-- Android 7.0+（API 24），支持 `arm64-v8a`、`armeabi-v7a`，并提供 `x86_64` 模拟器支持。
+- 输出固定为 AAC 音轨的紧凑 M4A 文件；有视频轨的输入会只导出音频。输出针对“处理完成后的本地文件”优化，未保留约 400 KB 的 progressive fast-start 预留区；如果业务要求边下载边播放，应在上传侧重新做 fast-start 封装。
+- Android 7.0+（API 24），提供 `arm64-v8a`、`armeabi-v7a` 和 `x86_64`。这覆盖主流 64 位 ARM 手机、仍需兼容的 32 位 ARM 旧机和 64 位模拟器，但不是“所有历史 Android”：不提供 32 位 `x86`、已淘汰的 `armeabi`/MIPS。
+- 当前真机证据是 OPPO PEGM10 / Android 13 / `arm64-v8a`；`armeabi-v7a`、`x86_64` 当前是 APK 打包、ELF 对齐和编译证据，尚不是对应硬件的真机证据。Android 官方 ABI 定义见 [Android NDK ABI 文档](https://developer.android.com/ndk/guides/abis)。
 - 支持 16 KB 内存页：当前依赖中的所有 ARM/x86_64 ELF LOAD 段均为 `0x4000` 对齐，示例 APK 也通过 `zipalign -P 16`。
 - 输入格式取决于设备的 `MediaExtractor`/`MediaCodec`。M4A/AAC、MP3、WAV、FLAC、Ogg 等常见格式通常可用，但厂商设备的编解码器集合可能不同。
 
@@ -113,6 +114,34 @@ TrimTask task = VadCut.with(context).trimAsync(request, new TrimListener() {
 
 完整的可运行示例位于 `sample-kotlin` 和 `sample-java`。
 
+## 自动裁剪算法与时间规则
+
+默认 `TrimRequest.Builder(...).build()` 使用 `VOICE_MEMO + SPEECH`，因此真实执行
+Silero VAD，而不是能量检测。规则按以下顺序执行：
+
+1. `MediaExtractor`/`MediaCodec` 流式解码输入。检测支路混为单声道并重采样到
+   16 kHz Float32 PCM，每 `512 samples = 32 ms` 形成一帧；不会把整段录音载入内存。
+2. `SPEECH` 模式把每帧和连续的 recurrent state 送入 Silero VAD v6.2.1 ONNX，
+   ONNX Runtime 返回 `0..1` 的人声概率。每次新任务创建新检测器，录音之间不共享状态。
+3. 尚未进入语音时，概率达到 `speechStartThreshold` 才开始区间；进入语音后，
+   只要概率仍达到较低的 `speechEndThreshold`，就更新“最后活动帧”。默认双阈值是
+   `0.55 / 0.35`，用于减少边缘抖动。
+4. 概率跌到结束阈值以下不会立刻切断。连续低概率达到
+   `minimumSilenceDurationMs` 后才确认区间结束，但原始语音区间终点回到“最后活动帧”，
+   不会把整段确认静音都保留下来。
+5. 原始区间短于 `minimumSpeechDurationMs`（默认 96 ms）会被丢弃，防止瞬态噪声形成切片。
+6. 对每段有效区间增加 `paddingBeforeMs` / `paddingAfterMs`，裁到音频边界内；扩展后
+   重叠或首尾相接的区间会合并。因此短停顿通常保留，只有足够长的静音才形成删除区间。
+7. 完整时间轴减去保留区间得到 `removedRanges`。第二遍按原输入的采样率和声道解码，
+   `RangeAudioProcessor` 只复制保留的 PCM 帧，在每个编辑边界应用默认 8 ms 线性淡入淡出，
+   最后只编码一次 AAC/M4A。
+8. 完全没有检测到活动时，默认 `KEEP_ORIGINAL`：导出整段并返回
+   `NO_ACTIVITY_DETECTED_KEPT_ORIGINAL` warning；也可设成 `FAIL`。
+
+`NON_SILENCE` 仍使用同一个区间规划器，但不会加载 Silero。它对每个 32 ms 帧计算
+`RMS → 20 × log10(RMS)`，达到 `energyThresholdDb`（默认 -45 dB）就输出活动值 `1`，
+否则输出 `0`；所以音乐、键盘声和风噪也可能被保留。
+
 ## 自定义切割时间点
 
 时间点始终基于**原始输入音频**，单位为毫秒；区间是半开区间 `[startTimeMs, endTimeMs)`。两种模式互斥：
@@ -177,9 +206,14 @@ sample-java/.../ManualTrimExamples.java
 
 推荐先使用预设：
 
-- `CONSERVATIVE`：静音至少 1.2 秒才切，保留更宽的人声边缘。
-- `VOICE_MEMO`：默认；静音至少 700 ms 才切，前置 180 ms、后置 250 ms。
-- `AGGRESSIVE`：静音约 350 ms 即切，成品更紧凑。
+| 预设 | 模式 | 开始/结束阈值 | 最短语音 | 确认静音 | 前/后 padding | 切点淡化 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `CONSERVATIVE` | `SPEECH` / Silero | `0.55 / 0.35` | 96 ms | 1,200 ms | 250 / 350 ms | 8 ms |
+| `VOICE_MEMO`（默认） | `SPEECH` / Silero | `0.55 / 0.35` | 96 ms | 700 ms | 180 / 250 ms | 8 ms |
+| `AGGRESSIVE` | `SPEECH` / Silero | `0.60 / 0.40` | 96 ms | 350 ms | 100 / 140 ms | 8 ms |
+
+三个预设默认全部运行 Silero；预设只改变阈值和时间规则。只有显式设置
+`TrimMode.NON_SILENCE` 才改用能量检测。
 
 自定义示例：
 
@@ -235,5 +269,50 @@ python scripts/verify_elf_alignment.py sample-kotlin/build/outputs/apk/debug/sam
 ```bash
 ./gradlew :vadcut:connectedDebugAndroidTest
 ```
+
+### OPPO 真机真实声音结果（2026-08-20）
+
+测试设备为 OPPO PEGM10、Android 13，系统 ABI 列表
+`arm64-v8a, armeabi-v7a, armeabi`，本次实际加载 `arm64-v8a` 原生库。输入是仓库内固定的
+真实声音文件 `vad-smoke.wav`，不是测试代码伪造的概率数组：16 kHz、mono、PCM S16LE，
+时长 11.478 秒，大小 367,380 bytes，SHA-256：
+`e9adfa21bbebc4f414a1f4dbdb95af5105628dca1ef441b5e92a61e819c1d61e`。
+波形包含两段语音和首尾/中间静音；FFmpeg 以 -45 dB 独立检测到约 5.615 秒静音。
+
+自动模式使用默认 `VOICE_MEMO + SPEECH`，真机真实加载 Silero ONNX 并得到：
+
+```text
+保留区间：[1932, 6426)、[6828, 9018) ms
+删除区间：[0, 1932)、[6426, 6828)、[9018, 11478) ms
+输入时长：11,478 ms
+规划输出：6,684 ms
+删除时长：4,794 ms（41.8%）
+```
+
+为避免把“WAV → AAC 压缩”误算成裁剪收益，测试还用同一个 SDK、同一台设备编码一份
+不裁剪的完整 M4A 作为同编码基线：
+
+| 文件 | `TrimResult` 时长 | M4A 容器实测时长 | 文件大小 |
+| --- | ---: | ---: | ---: |
+| 原始 PCM WAV | 11,478 ms | 11,478 ms | 367,380 B |
+| 完整 M4A（同编码对照） | 11,478 ms | 11,456 ms | 140,255 B |
+| Silero 裁剪 M4A | 6,684 ms | 6,656 ms | 81,755 B |
+
+- 对比完整 M4A：时长减少 `41.8%`，文件减少 `58,500 B / 41.7%`。
+- 对比原始 WAV：文件减少 `285,625 B / 77.7%`，其中同时包含 AAC 压缩收益。
+- 规划时长与容器时长相差 28 ms，来自 AAC encoder delay/帧粒度，在测试允许的
+  500 ms 误差内。
+- 手动保留、手动删除和自动 Silero 三条测试在该设备上 `3/3` 通过，输出都由
+  `MediaExtractor` 重新打开并确认仅含一条可播放 AAC 音轨。
+
+本轮还修复了 Media3 1.11.0 默认 streamable MP4 预留约 398 KB `free` box 的问题；
+官方文档明确说明启用该选项会增大文件，较小文件应设为 `false`，见
+[InAppMp4Muxer.Factory](https://developer.android.com/reference/androidx/media3/transformer/InAppMp4Muxer.Factory#setAttemptStreamableOutputEnabled(boolean))。
+回归测试现在同时断言裁剪 M4A 小于完整 M4A，也小于原始 WAV。
+
+这证明当前版本在该 arm64 真机和该真实声音样本上完成了“解码 → Silero 推理 →
+区间规划 → PCM 裁剪/淡化 → AAC/M4A → 可播放性复查”全链路，但不等于已经完成全部
+量产验收。正式发布仍建议补齐多厂商/多 Android 版本、`armeabi-v7a` 真机、`x86_64`
+模拟器、不同输入容器、1–4 小时长录音、低存储/取消/后台以及噪声语料准确率测试。
 
 本仓库源码采用 Apache-2.0。第三方组件和模型见 `THIRD_PARTY_NOTICES.md`。

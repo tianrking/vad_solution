@@ -10,24 +10,35 @@ ios/       iOS 离线 SDK：同一 Silero ONNX + ONNX Runtime Objective-C/Apple 
 
 ## 三平台真实 VAD 架构
 
-三套实现相互独立。VPS 使用无神经网络模型的 WebRTC VAD；Android 和 iOS 使用
-内容完全相同的 Silero VAD v6.2.1 ONNX 文件，但各自在自己的 SDK 资源中打包一份。
-该 ONNX 文件与 CPU 架构无关，大小均为 `2,327,524` bytes，SHA-256 均为
-`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`。
+先给出不会混淆的结论：
+
+- **Android 默认走 Silero**：`TrimRequest.Builder(...).build()` 默认使用
+  `voiceMemo`，而 `voiceMemo` 的 `mode` 是 `SPEECH`。`conservative`、
+  `voiceMemo`、`aggressive` 三个预设默认也全部是 `SPEECH`，只调整阈值和时间参数。
+- **iOS 默认也走 Silero**：`TrimRequest` 默认配置是 `voiceMemo`，其 `mode` 是
+  `.speech`；三个预设同样默认全部是 `.speech`。
+- **`NON_SILENCE` 不是 Silero 的自动降级路径**：只有调用方显式设置
+  `NON_SILENCE` / `.nonSilence` 才走 RMS 能量检测。它没有模型，不判断是不是人声。
+- **Android 手动区间优先级最高**：传入 `manualTrimPlan`、`setRemovedRanges` 或
+  `setKeptRanges` 后，会绕过 Silero 和能量检测；iOS 0.1.0 当前没有手动区间 API。
+- **VPS 固定使用 WebRTC VAD**：不使用 Silero，也不使用 ONNX Runtime。
+
+`ONNX` 是模型文件格式；本项目移动端唯一的 ONNX 文件就是 Silero VAD 模型。
+`ONNX Runtime`（ORT）不是另一种 VAD，它只是加载并执行 `silero_vad.onnx` 的
+原生推理引擎。因此在本项目中，进入 ORT 推理路径就表示正在运行 Silero。
 
 ```mermaid
 flowchart TB
     INPUT["输入音频文件"]
-    MODEL["Silero VAD v6.2.1 ONNX<br>架构无关，Android / iOS 各自打包一份"]
 
-    subgraph VPS["VPS / Linux CPU"]
+    subgraph VPS["VPS / Linux CPU：固定使用 WebRTC VAD"]
         direction TB
-        V1["FFmpeg<br>16 kHz mono PCM S16LE"]
-        V2["webrtcvad-wheels 2.0.14<br>WebRTC VAD，无 ONNX 模型"]
-        V3["Python 区间规划<br>长静音、短停顿、边界保护"]
-        V4["FFmpeg<br>原采样率和原声道 PCM S16LE"]
-        V5["Python 帧字节区间硬拼接<br>无淡入淡出或交叉淡化"]
-        V6["FFmpeg<br>AAC/M4A 或 PCM/WAV"]
+        V1["FFmpeg 解码检测流<br/>16 kHz mono PCM S16LE"]
+        V2["WebRTC VAD：webrtcvad-wheels 2.0.14<br/>无 Silero、无 ONNX、无 ONNX Runtime"]
+        V3["Python 区间规划<br/>长静音、短停顿、边界保护"]
+        V4["FFmpeg 解码重建流<br/>原采样率、原声道 PCM S16LE"]
+        V5["Python 按帧字节硬拼接保留区间<br/>无淡入淡出或交叉淡化"]
+        V6["FFmpeg 编码或封装<br/>AAC/M4A 或 PCM/WAV"]
         V1 --> V2
         V2 --> V3
         V3 --> V4
@@ -37,65 +48,110 @@ flowchart TB
 
     subgraph ANDROID["Android 离线 SDK 0.2.0"]
         direction TB
-        A1["MediaExtractor + MediaCodec<br>流式解码 PCM"]
-        A2["StreamingMonoResampler<br>16 kHz mono，512 samples/frame"]
-        A3["Kotlin SileroVadEngine<br>ONNX Runtime Java API"]
-        A4["onnxruntime-android 1.28.0<br>JNI + 当前 Android ABI 的原生 .so"]
-        A5["ActivitySegmentPlanner / ManualRangePlanner<br>生成保留和删除区间"]
-        A6["Media3 RangeAudioProcessor<br>删除 PCM 帧 + 边界淡入淡出"]
-        A7["Media3 Transformer<br>AAC/M4A"]
-        AE["NON_SILENCE：Kotlin RMS 能量检测<br>无模型"]
-        AM["手动删除/保留时间区间<br>绕过 VAD 和能量检测"]
+        A0["TrimRequest<br/>默认 config = voiceMemo = SPEECH"]
+        AMANUAL{"是否传入 manualTrimPlan？"}
+        ADURATION["MediaExtractor + MediaCodec<br/>仅流式解码并取得精确时长"]
+        AM["ManualRangePlanner<br/>按调用方时间区间生成保留/删除区间<br/>不运行 Silero，也不运行能量检测"]
+        A1["MediaExtractor + MediaCodec<br/>流式解码 PCM"]
+        A2["StreamingMonoResampler<br/>16 kHz mono Float32，512 samples/frame"]
+        AMODE{"config.mode 是什么？"}
+        AS["SPEECH 路径：默认，有模型<br/>Silero VAD v6.2.1 ONNX：2.22 MiB、模型架构无关<br/>ONNX Runtime Android 1.28.0 执行模型<br/>当前 Example ABI：arm64-v8a / armeabi-v7a / x86_64<br/>输出每帧语音概率"]
+        AE["NON_SILENCE 路径：仅显式设置，无模型<br/>Kotlin RMS 转 dB，达到阈值即活动<br/>默认阈值 -45 dB；音乐和噪声也可能保留<br/>不创建 Silero 推理会话"]
+        AP["ActivitySegmentPlanner<br/>最短语音/静音、padding、阈值迟滞<br/>生成保留和删除区间"]
+        A6["Media3 RangeAudioProcessor<br/>删除 PCM 帧 + 编辑边界淡入淡出"]
+        A7["Media3 Transformer<br/>AAC/M4A"]
+        A0 --> AMANUAL
+        AMANUAL -- "是：手动优先" --> ADURATION
+        ADURATION --> AM
+        AM --> A6
+        AMANUAL -- "否：自动检测" --> A1
         A1 --> A2
-        A2 --> A3
-        A3 --> A4
-        A4 --> A5
-        A2 --> AE
-        AE --> A5
-        AM --> A5
-        A5 --> A6
+        A2 --> AMODE
+        AMODE -- "SPEECH：默认" --> AS
+        AMODE -- "NON_SILENCE：仅显式设置" --> AE
+        AS --> AP
+        AE --> AP
+        AP --> A6
         A6 --> A7
     end
 
     subgraph IOS["iOS 离线 SDK 0.1.0"]
         direction TB
-        I1["AVAssetReader<br>流式解码"]
-        I2["16 kHz mono Float32 PCM<br>512 samples/frame"]
-        I3["Swift SileroVadEngine<br>ONNX Runtime Objective-C API"]
-        I4["onnxruntime-objc 1.28.0 CocoaPod<br>Xcode 链接当前 Apple 目标架构"]
-        I5["ActivitySegmentPlanner<br>生成保留和删除区间"]
-        I6["AVMutableComposition + AVAudioMix<br>区间拼接 + 音量淡入淡出"]
-        I7["AVAssetExportSession<br>AAC/M4A"]
-        IE["NON_SILENCE：Swift RMS 能量检测<br>无模型"]
+        I0["TrimRequest<br/>默认 config = voiceMemo = speech<br/>当前无手动区间 API"]
+        I1["AVAssetReader 流式解码"]
+        I2["16 kHz mono Float32 PCM<br/>512 samples/frame"]
+        IMODE{"config.mode 是什么？"}
+        IS["speech 路径：默认，有模型<br/>同一 Silero VAD v6.2.1 ONNX：2.22 MiB、模型架构无关<br/>ONNX Runtime Objective-C 1.28.0 执行模型<br/>官方架构：真机 arm64 / 模拟器 x86_64<br/>输出每帧语音概率"]
+        IE["nonSilence 路径：仅显式设置，无模型<br/>Swift RMS 转 dB，达到阈值即活动<br/>默认阈值 -45 dB；音乐和噪声也可能保留<br/>不创建 Silero 推理会话"]
+        I5["ActivitySegmentPlanner<br/>最短语音/静音、padding、阈值迟滞<br/>生成保留和删除区间"]
+        I6["AVMutableComposition + AVAudioMix<br/>区间拼接 + 音量淡入淡出"]
+        I7["AVAssetExportSession<br/>AAC/M4A"]
+        I0 --> I1
         I1 --> I2
-        I2 --> I3
-        I3 --> I4
-        I4 --> I5
-        I2 --> IE
+        I2 --> IMODE
+        IMODE -- "speech：默认" --> IS
+        IMODE -- "nonSilence：仅显式设置" --> IE
+        IS --> I5
         IE --> I5
         I5 --> I6
         I6 --> I7
     end
 
     INPUT --> V1
-    INPUT --> A1
-    INPUT --> I1
-    MODEL --> A3
-    MODEL --> I3
+    INPUT --> A0
+    INPUT --> I0
 ```
 
-### 模型、ABI 与原生运行时的关系
+### 什么时候走哪一种检测
 
-| 平台 | VAD 模型 | 原生运行时与架构选择 | 运行时是否下载 |
+| 平台/调用方式 | 真实触发条件 | 实际检测器 | 是否运行 Silero / ORT |
 | --- | --- | --- | --- |
-| VPS | 无模型；`webrtcvad-wheels==2.0.14` 的 WebRTC VAD | 部署时安装与服务器 OS/CPU 匹配的 Python wheel 和 FFmpeg | 否 |
-| Android | AAR `assets` 中的一份 Silero ONNX | Gradle 构建时解析 `onnxruntime-android:1.28.0`；当前 Example APK 包含 `arm64-v8a`、`armeabi-v7a`、`x86_64` 的 `libonnxruntime.so` 和 `libonnxruntime4j_jni.so`，Android 只加载当前 ABI | 否 |
-| iOS | CocoaPods resource bundle 中的一份相同 Silero ONNX | CocoaPods 构建时解析 `onnxruntime-objc:1.28.0`；Xcode 为当前 iPhone/iPad 或 Simulator 目标链接对应的 Apple 原生架构，不使用 Android ABI 名称 | 否 |
+| Android 默认请求 | `TrimRequest.Builder(...).build()`，默认 `voiceMemo + SPEECH` | Silero VAD v6.2.1 | 是 / 是 |
+| Android 三种预设 | `conservative`、`voiceMemo`、`aggressive` 默认都保持 `SPEECH` | Silero VAD v6.2.1 | 是 / 是 |
+| Android 非静音模式 | 调用方显式设置 `TrimMode.NON_SILENCE` | Kotlin RMS 能量检测 | 否 / 否；但 ORT 原生库仍可能随依赖打进 APK |
+| Android 手动模式 | 传入 `manualTrimPlan`、`setRemovedRanges` 或 `setKeptRanges` | `ManualRangePlanner`，只按调用方时间区间 | 否 / 否；探测参数被忽略，`fadeDurationMs` 仍生效 |
+| iOS 默认请求/三种预设 | 默认 `voiceMemo + .speech`；三个预设默认都保持 `.speech` | Silero VAD v6.2.1 | 是 / 是 |
+| iOS 非静音模式 | 调用方显式设置 `.nonSilence` | Swift RMS 能量检测 | 否 / 否；但 ORT framework 仍可能随依赖链接进 App |
+| VPS 自动接口 | 服务端没有移动端的 `SPEECH/NON_SILENCE` 模式选择 | WebRTC VAD | 否 / 否 |
 
-所以从广义上说，Android 和 iOS 都需要“与硬件架构匹配的 ONNX Runtime 原生二进制”；
-但严格来说只有 Android 使用 `arm64-v8a` 等 Android ABI。iOS 使用 Xcode 的 Apple
-设备/模拟器目标架构选择。两端变化的是 ONNX Runtime 原生库，不是 Silero ONNX
-模型；依赖只在构建阶段解析，音频处理运行阶段完全离线。
+这里的“否 / 否”表示本次音频分析不会加载 Silero 模型或创建 ORT 推理会话；不表示
+构建产物一定剔除了 ORT 二进制。Android/iOS SDK 在构建时仍声明了 ORT 依赖。
+
+### `NON_SILENCE` 到底是什么
+
+Android 与 iOS 实现相同的判断逻辑，针对每个 16 kHz、512 samples（约 32 ms）
+Float32 PCM 帧计算：
+
+```text
+RMS = sqrt(sum(sample²) / N)
+dB  = 20 × log10(max(RMS, 极小正数))
+dB >= energyThresholdDb（默认 -45 dB） => 活动帧 1，否则静音帧 0
+```
+
+能量检测器只输出二值 `1/0`，随后仍交给 `ActivitySegmentPlanner` 应用最短语音、
+最短静音、前后 padding 等时间规则。因为它只看“响不响”，所以人声、音乐、敲键盘、
+风噪等只要达到阈值都可能保留；它适合“删除真正安静的部分”，不适合“只保留人声”。
+
+### Silero 模型、ABI 与 ONNX Runtime 的关系
+
+| 项目 | 当前真实情况 |
+| --- | --- |
+| Silero 模型版本 | v6.2.1，文件名 `silero_vad.onnx` |
+| 单份模型大小 | `2,327,524` bytes，约 `2.22 MiB`；Android 和 iOS 各自在资源中打包一份 |
+| 模型一致性 | 两份 SHA-256 都是 `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3` |
+| 模型架构 | ONNX 文件本身与 CPU/ABI 无关；同一个模型文件可交给不同平台的 ORT 执行 |
+| Android 原生运行时 | `onnxruntime-android:1.28.0`，Java API → JNI → 当前 ABI 的 `libonnxruntime.so` / `libonnxruntime4j_jni.so` |
+| Android 当前 Example ABI | `arm64-v8a`、`armeabi-v7a`、`x86_64`；APK 同时带三套库，设备只加载匹配自己 ABI 的一套 |
+| iOS 原生运行时 | `onnxruntime-objc:1.28.0` CocoaPod，Swift 调 Objective-C API；项目最低 iOS 15.1 |
+| iOS 架构 | 不是 Android ABI。ONNX Runtime 官方 iOS 构建文档列出真机 `arm64`、模拟器 `x86_64`；CocoaPods/Xcode 为当前 Apple target 链接对应产物 |
+| 运行时联网 | Gradle/CocoaPods 只在构建阶段解析依赖；模型已随 SDK 打包，处理音频时完全离线、不临时下载模型 |
+
+所以，“Silero 支持哪些架构”更准确的说法是：**Silero ONNX 模型不分架构，真正
+区分架构的是 ONNX Runtime 原生库**。Android 当前交付覆盖上述三个 ABI；iOS 由
+`onnxruntime-objc` 和 Xcode target 选择 Apple 架构。ONNX Runtime 官方说明其
+Objective-C API 用于在 iOS 设备上运行 ONNX 模型，官方 artifact 通过 CocoaPods
+发布；详见 [Objective-C API](https://onnxruntime.ai/docs/get-started/with-obj-c.html)
+和 [iOS 构建与架构说明](https://onnxruntime.ai/docs/build/ios.html)。
 
 ## Android 推荐主链路
 
@@ -166,5 +222,5 @@ Content-Type: audio/mp4
 ## 当前状态
 
 - VPS 版本已经实现并在本地真实音频和 HTTP 接口上验证。
-- Android 已实现完整本地离线 SDK，支持 Silero VAD、能量非静音模式、Android `Uri` 输入和 AAC/M4A 导出；正式投产前仍需完成真机矩阵与长录音压力测试。
+- Android 已实现完整本地离线 SDK，支持 Silero VAD、能量非静音模式、手动区间、Android `Uri` 输入和紧凑 AAC/M4A 导出；OPPO Android 13 `arm64-v8a` 真机已通过真实声音自动裁剪、同编码体积对照、手动保留/删除 `3/3` 全链路测试，其他 ABI 当前仍是打包/构建证据，正式投产前仍需完成多机型矩阵与长录音压力测试。
 - iOS 已实现与 Android 对齐的本地离线 SDK，使用同一 Silero 模型，并由 macOS GitHub Actions 执行 Xcode 模拟器构建、推理和 M4A 端到端测试；正式投产前仍需真实 iPhone 验证。

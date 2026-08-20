@@ -12,6 +12,9 @@
 - Fixed cancellation classification during the final output copy.
 - Samples now remove their newly created SAF output document after cancellation or failure.
 - Added unit tests, connected-device end-to-end tests, and compiled Kotlin/Java manual examples.
+- Fixed the instrumented test methods to expose valid JUnit `void` signatures.
+- Added real-audio device metrics with an untrimmed same-codec M4A size baseline.
+- Disabled Media3's streamable MP4 reservation for compact local M4A output and added a size regression assertion.
 
 ## 0.1.0 - 2026-08-19
 

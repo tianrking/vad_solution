@@ -12,6 +12,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.InAppMp4Muxer
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.vadcut.android.TrimErrorCode
@@ -78,6 +79,9 @@ internal class Media3AudioExporter(private val context: Context) {
             try {
                 transformer = Transformer.Builder(context)
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    // The SDK writes a complete local artifact. Avoid Media3's default reserved
+                    // fast-start space, which adds roughly 400 KB to every short M4A file.
+                    .setMuxerFactory(InAppMp4Muxer.Factory().setAttemptStreamableOutputEnabled(false))
                     .addListener(listener)
                     .build()
                 val editedItem = EditedMediaItem.Builder(MediaItem.fromUri(inputUri))
